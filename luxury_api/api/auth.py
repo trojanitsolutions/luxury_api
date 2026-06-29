@@ -1,35 +1,24 @@
 import frappe
 from frappe import _
 from frappe.auth import LoginManager
+from frappe.utils.password import check_password as _check_password
 
 
 @frappe.whitelist(allow_guest=True)
 def login(usr, pwd):
-	"""
-	Authenticate a user and return enriched session data.
+	
+	try:
+		user_name = _check_password(usr, pwd)
+	except frappe.AuthenticationError:
+		frappe.throw(_("Invalid credentials"), frappe.AuthenticationError)
 
-	Performs standard Frappe credential validation via LoginManager, then
-	appends the authenticated user's roles and User Permission records to the
-	response so the caller does not need a second round-trip.
+	user_doc = frappe.db.get_value("User", user_name, ["name", "email", "full_name", "enabled"], as_dict=True)
+	active = bool(user_doc.enabled)
 
-	Args:
-	    usr (str): Username or email address.
-	    pwd (str): Plain-text password.
-
-	Returns:
-	    dict: Frappe-standard login fields plus:
-	        - name             — User ID (email)
-	        - email            — User email
-	        - full_name        — Display name
-	        - roles            — List of role names
-	        - user_permissions — List of permission dicts
-	"""
-	manager = LoginManager()
-	manager.authenticate(user=usr, pwd=pwd)
-	manager.post_login()
-
-	user = frappe.session.user
-	user_doc = frappe.db.get_value("User", user, ["name", "email", "full_name"], as_dict=True)
+	if active:
+		manager = LoginManager()
+		manager.authenticate(user=usr, pwd=pwd)
+		manager.post_login()
 
 	return {
 		"message": "Logged In",
@@ -37,8 +26,9 @@ def login(usr, pwd):
 		"name": user_doc.name,
 		"email": user_doc.email,
 		"full_name": user_doc.full_name,
-		"roles": _get_roles(user),
-		"user_permissions": _get_user_permissions(user),
+		"active": active,
+		"roles": _get_roles(user_name),
+		"user_permissions": _get_user_permissions(user_name),
 	}
 
 
