@@ -6,14 +6,11 @@ def create_custom_fields():
         "POS Profile": [
             {
                 "fieldname": "branch",
-                "fieldtype": "Link",
-                "options": "Warehouse",
+                "fieldtype": "Data",
                 "label": "Branch",
                 "insert_after": "company_address",
                 "fetch_from": "warehouse.branch",
                 "read_only": 1,
-
-                
             }
         ]
     }
