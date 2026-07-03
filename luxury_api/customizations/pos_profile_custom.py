@@ -15,12 +15,15 @@ def create_custom_fields():
         ]
     }
 
-    for doctype, fields in custom_fields.items(): 
-        for field in fields: 
-            if not frappe.db.exists("Custom Field", {"dt": doctype, "fieldname": field["fieldname"]}):
-                create_custom_field(doctype, field) 
-                frappe.db.commit() 
-                frappe.clear_cache(doctype=doctype)
+    for doctype, fields in custom_fields.items():
+        for field in fields:
+            cf_name = f"{doctype}-{field['fieldname']}"
+            if frappe.db.exists("Custom Field", cf_name):
+                frappe.db.set_value("Custom Field", cf_name, {"fieldtype": field["fieldtype"]})
+            else:
+                create_custom_field(doctype, field)
+            frappe.db.commit()
+            frappe.clear_cache(doctype=doctype)
 
 def delete_custom_fields(): 
     custom_fields_to_delete = { "POS Profile": ["branch"] }  
