@@ -14,7 +14,7 @@ def get_items(item_group=None, search=None, page=1, page_size=20):
 	page = max(1, int(page))
 	page_size = min(100, max(1, int(page_size)))
 
-	filters = {"disabled": 0, "is_sales_item": 1}
+	filters = {"is_sales_item": 1}
 	if item_group:
 		filters["item_group"] = item_group
 
