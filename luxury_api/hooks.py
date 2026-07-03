@@ -8,7 +8,11 @@ app_license = "mit"
 # Apps
 # ------------------
 
-# required_apps = []
+required_apps = ["dms"]
+
+after_install = "luxury_api.customizations.pos_profile_custom.create_custom_fields"
+after_uninstall = "luxury_api.customizations.pos_profile_custom.delete_custom_fields"
+after_migrate = "luxury_api.customizations.pos_profile_custom.create_custom_fields"
 
 # Each item in the list will be shown as an app in the apps page
 # add_to_apps_screen = [
