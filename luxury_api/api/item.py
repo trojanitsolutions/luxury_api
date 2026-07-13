@@ -6,15 +6,16 @@ from frappe.utils import get_url
 
 
 @frappe.whitelist(allow_guest=False)
-def get_items(item_group=None, search=None, page=1, page_size=20):
+def get_items(item_group=None, search=None, page=1, page_size=None):
 
 	if item_group:
 		_validate_item_group(item_group)
 
 	page = max(1, int(page))
-	page_size = min(100, max(1, int(page_size)))
+	page_size = int(page_size) if page_size else 10000
+	page_size = min(10000, max(1, page_size))
 
-	filters = {"is_sales_item": 1}
+	filters = {"is_sales_item": 1, "disabled": 0}
 	if item_group:
 		filters["item_group"] = item_group
 
