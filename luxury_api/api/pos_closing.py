@@ -1,7 +1,93 @@
 import frappe
+from datetime import datetime
 from erpnext.accounts.doctype.pos_closing_entry.pos_closing_entry import make_closing_entry_from_opening
 from frappe import _
 from frappe.utils import flt
+
+
+@frappe.whitelist(allow_guest=False, methods=["GET"])
+def get_pos_closing_entries(
+	pos_profile: str | None = None,
+	company: str | None = None,
+	posting_date: str | None = None,
+	status: str | None = None,
+	pos_opening_entry: str | None = None,
+):
+	"""Fetch POS Closing Entries with optional filters."""
+	filters = []
+	applied_filters = {}
+
+	if posting_date:
+		try:
+			datetime.strptime(posting_date, "%Y-%m-%d")
+		except ValueError:
+			frappe.local.response.http_status_code = 400
+			return {"success": False, "message": "Invalid posting_date format. Use YYYY-MM-DD."}
+		filters.append(["posting_date", "=", posting_date])
+		applied_filters["posting_date"] = posting_date
+
+	if pos_profile:
+		filters.append(["pos_profile", "=", pos_profile])
+		applied_filters["pos_profile"] = pos_profile
+
+	if company:
+		filters.append(["company", "=", company])
+		applied_filters["company"] = company
+
+	if status:
+		filters.append(["status", "=", status])
+		applied_filters["status"] = status
+
+	if pos_opening_entry:
+		filters.append(["pos_opening_entry", "=", pos_opening_entry])
+		applied_filters["pos_opening_entry"] = pos_opening_entry
+
+	try:
+		names = frappe.db.get_list(
+			"POS Closing Entry",
+			filters=filters or None,
+			pluck="name",
+			order_by="posting_date desc",
+		)
+
+		entries = []
+		for name in names:
+			doc = frappe.get_doc("POS Closing Entry", name)
+			entries.append({
+				"name": doc.name,
+				"company": doc.company,
+				"pos_profile": doc.pos_profile,
+				"user": doc.user,
+				"pos_opening_entry": doc.pos_opening_entry,
+				"posting_date": str(doc.posting_date),
+				"period_start_date": str(doc.period_start_date),
+				"period_end_date": str(doc.period_end_date),
+				"status": doc.status,
+				"grand_total": doc.grand_total,
+				"net_total": doc.net_total,
+				"total_quantity": doc.total_quantity,
+				"payment_reconciliation": [
+					{
+						"mode_of_payment": d.mode_of_payment,
+						"opening_amount": d.opening_amount,
+						"expected_amount": d.expected_amount,
+						"closing_amount": d.closing_amount,
+						"difference": d.difference,
+					}
+					for d in doc.payment_reconciliation
+				],
+			})
+
+		return {
+			"success": True,
+			"count": len(entries),
+			"filters": applied_filters,
+			"data": entries,
+		}
+	except Exception as e:
+		frappe.log_error(title="pos_closing.get_pos_closing_entries", message=str(e))
+		frappe.local.response.http_status_code = 500
+		return {"success": False, "message": str(e)}
 
 
 @frappe.whitelist(methods=["POST"])
