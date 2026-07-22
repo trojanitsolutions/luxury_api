@@ -54,6 +54,7 @@ def create_pos_invoice(**kwargs):
 			"items": [{"item_code": i["item_code"], "qty": i["qty"]} for i in data["items"]],
 			"payments": [{"mode_of_payment": p["mode_of_payment"], "amount": p["amount"]} for p in data["payments"]],
 		})
+		doc.set_missing_values()
 		doc.set_account_for_mode_of_payment()
 		doc.insert()
 		doc.submit()
