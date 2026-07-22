@@ -14,6 +14,11 @@ after_install = "luxury_api.customizations.pos_profile_custom.create_custom_fiel
 after_uninstall = "luxury_api.customizations.pos_profile_custom.delete_custom_fields"
 after_migrate = "luxury_api.customizations.pos_profile_custom.create_custom_fields"
 
+# Extend DocType Class
+extend_doctype_class = {
+	"POS Closing Entry": "luxury_api.customizations.pos_closing_entry_override.POSClosingEntryOverride"
+}
+
 # Each item in the list will be shown as an app in the apps page
 # add_to_apps_screen = [
 # 	{
