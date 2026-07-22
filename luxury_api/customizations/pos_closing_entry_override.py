@@ -5,12 +5,23 @@ class POSClosingEntryOverride:
 	"""
 	Mixin to override POS Closing Entry validation.
 	Skips user ownership validation to allow multi-cashier closings from API.
+
+	Preserves invoice-fetching behavior while fixing the user validation issue
+	for REST API usage where the closing user may differ from invoice creators.
 	"""
 
 	def validate_pos_invoices(self):
 		"""
-		Skip user ownership validation for POS Closing Entry.
-		Allows invoices from multiple cashiers to be consolidated in one closing.
+		Override POS Invoice validation to skip user ownership check.
+		API layer (luxury_api) handles multi-user/multi-cashier POS closing sessions.
+
+		Validates:
+		- No duplicate invoices
+		- Invoice already consolidated
+		- POS Profile match
+		- Invoice is submitted
+
+		Skips: user ownership check (commented in ERPNext line 126-129)
 		"""
 		invalid_rows = []
 
@@ -19,7 +30,7 @@ class POSClosingEntryOverride:
 			pos_invoice = frappe.db.get_values(
 				"POS Invoice",
 				d.pos_invoice,
-				["consolidated_invoice", "pos_profile", "docstatus"],
+				["consolidated_invoice", "pos_profile", "docstatus", "owner"],
 				as_dict=1,
 			)[0]
 
@@ -35,21 +46,21 @@ class POSClosingEntryOverride:
 			if pos_invoice.docstatus != 1:
 				invalid_row.setdefault("msg", []).append(frappe._("POS Invoice is not submitted"))
 
-			# ponytail: skip user ownership check — API handles multi-cashier closings
-			# if pos_invoice.owner != self.user:
-			#     invalid_row.setdefault("msg", []).append(...)
+			# ponytail: intentionally skip user ownership check
+			# ERPNext checks: if pos_invoice.owner != self.user
+			# API usage requires invoices from multiple users in one closing session
 
 			if invalid_row.get("msg"):
 				invalid_rows.append(invalid_row)
 
-		# Validate sales invoices
+		# Validate sales invoices (only if enabled)
 		if self.invoice_type == "Sales Invoice" or len(self.sales_invoices) > 0:
 			for d in self.sales_invoices:
 				invalid_row = {"idx": d.idx}
 				sales_invoice = frappe.db.get_values(
 					"Sales Invoice",
 					d.sales_invoice,
-					["pos_profile", "docstatus", "is_pos", "is_created_using_pos", "pos_closing_entry"],
+					["pos_profile", "docstatus", "is_pos", "is_created_using_pos", "pos_closing_entry", "owner"],
 					as_dict=1,
 				)[0]
 
@@ -71,9 +82,7 @@ class POSClosingEntryOverride:
 				if sales_invoice.docstatus != 1:
 					invalid_row.setdefault("msg", []).append(frappe._("Sales Invoice is not submitted"))
 
-				# ponytail: skip user ownership check
-				# if sales_invoice.owner != self.user:
-				#     invalid_row.setdefault("msg", []).append(...)
+				# ponytail: intentionally skip user ownership check (same reason as POS Invoices above)
 
 				if invalid_row.get("msg"):
 					invalid_rows.append(invalid_row)
