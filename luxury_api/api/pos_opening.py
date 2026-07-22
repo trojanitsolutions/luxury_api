@@ -70,7 +70,7 @@ def create_pos_opening_entry(
 	period_start_date: str,
 	balance_details: list,
 ):
-	"""Create a new POS Opening Entry."""
+	
 	try:
 		doc = frappe.get_doc({
 			"doctype": "POS Opening Entry",

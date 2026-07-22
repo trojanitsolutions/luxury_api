@@ -72,7 +72,7 @@ def create_pos_invoice(**kwargs):
 
 @frappe.whitelist(allow_guest=False, methods=["GET"])
 def get_pos_invoice(invoice: str):
-	"""Fetch a single POS Invoice."""
+	
 	invoice = (invoice or "").strip()
 
 	if not invoice:
@@ -199,7 +199,6 @@ def cancel_pos_invoice(invoice: str):
 		"message": "POS Invoice cancelled successfully.",
 		"data": {"name": doc.name, "status": doc.status},
 	}
-
 
 @frappe.whitelist(methods=["POST"])
 def create_return_invoice(invoice: str):
