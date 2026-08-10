@@ -76,6 +76,28 @@ def get_pos_closing_entries(
 					}
 					for d in doc.payment_reconciliation
 				],
+				"sales_invoices": [
+					{
+						"sales_invoice": d.sales_invoice,
+						"posting_date": str(d.posting_date) if d.posting_date else None,
+						"customer": d.customer,
+						"grand_total": d.grand_total,
+						"is_return": d.is_return,
+						"return_against": d.return_against,
+					}
+					for d in doc.sales_invoices
+				],
+				"pos_invoices": [
+					{
+						"pos_invoice": d.pos_invoice,
+						"posting_date": str(d.posting_date) if d.posting_date else None,
+						"customer": d.customer,
+						"grand_total": d.grand_total,
+						"is_return": d.is_return,
+						"return_against": d.return_against,
+					}
+					for d in doc.pos_invoices
+				],
 			})
 
 		return {
@@ -127,7 +149,6 @@ def create_pos_closing_entry(
 		opening_entry = frappe.get_doc("POS Opening Entry", pos_opening_entry)
 		closing_entry = make_closing_entry_from_opening(opening_entry)
 
-		_add_invoices_to_closing_entry(closing_entry, opening_entry)
 		_seed_opening_amounts(closing_entry, opening_entry)
 		_apply_default_closing_amounts(closing_entry)
 		if payment_reconciliation:
@@ -152,50 +173,6 @@ def create_pos_closing_entry(
 		"message": "POS Closing Entry created successfully.",
 		"pos_closing_entry": closing_entry.as_dict(),
 	}
-
-
-def _fetch_pos_invoices(opening_entry):
-	"""Fetch all submitted POS Invoices from the opening session that are not yet linked to a closing entry."""
-	already_linked = frappe.get_all(
-		"POS Invoice Reference",
-		filters={},
-		fields=["pos_invoice"],
-		distinct=True,
-	)
-	linked_invoice_names = {row.pos_invoice for row in already_linked}
-
-	invoices = frappe.get_all(
-		"POS Invoice",
-		filters={
-			"company": opening_entry.company,
-			"pos_profile": opening_entry.pos_profile,
-			"docstatus": 1,
-			"posting_date": [">=", opening_entry.period_start_date],
-		},
-		fields=["name"],
-		order_by="posting_date asc",
-	)
-
-	open_invoices = [inv for inv in invoices if inv.name not in linked_invoice_names]
-
-	if not open_invoices:
-		frappe.throw(_("No POS Invoices found for this opening session."))
-
-	return open_invoices
-
-
-def _add_invoices_to_closing_entry(closing_entry, opening_entry):
-	"""Fetch and add POS Invoices to the closing entry."""
-	# Only add invoices if not already populated by make_closing_entry_from_opening()
-	if closing_entry.pos_invoices:
-		return
-
-	invoices = _fetch_pos_invoices(opening_entry)
-
-	for invoice in invoices:
-		closing_entry.append("pos_invoices", {
-			"pos_invoice": invoice.name,
-		})
 
 
 def _seed_opening_amounts(closing_entry, opening_entry):
