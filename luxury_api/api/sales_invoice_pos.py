@@ -44,7 +44,7 @@ def _validate_rows(rows, label, text_field, num_field):
 
 
 def _prorate_payments(payments, ratio, precision):
-	if not payments or ratio == 0:
+	if not payments:
 		return payments
 
 	multiplier = 10 ** precision
@@ -71,8 +71,8 @@ def _prorate_payments(payments, ratio, precision):
 		proroted.append({
 			"mode_of_payment": payment.get("mode_of_payment"),
 			"type": payment.get("type"),
-			"amount": scaled_amount,
-			"base_amount": scaled_base_amount,
+			"amount": -abs(scaled_amount),
+			"base_amount": -abs(scaled_base_amount),
 			"account": payment.get("account"),
 			"default": payment.get("default"),
 		})
