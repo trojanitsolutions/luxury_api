@@ -4,7 +4,7 @@ from datetime import datetime
 from frappe import _
 from frappe.utils import flt, cint
 
-FIELDS = ("customer", "company", "pos_profile", "items", "payments", "warehouse", "posting_date", "remarks", "update_stock")
+FIELDS = ("customer", "company", "pos_profile", "items", "payments", "warehouse", "posting_date", "remarks", "update_stock", "discount_type", "discount_percentage", "discount_amount")
 RETURN_FIELDS = ("original_invoice", "posting_date", "posting_time", "remarks", "update_stock", "set_posting_time", "items")
 
 
@@ -41,6 +41,52 @@ def _validate_rows(rows, label, text_field, num_field):
 				frappe.throw(_("Row {0}: {1} must be greater than 0.").format(idx, num_field))
 		except (TypeError, ValueError):
 			frappe.throw(_("Row {0}: {1} must be a valid number.").format(idx, num_field))
+
+
+def _resolve_discount(payload, label):
+	"""Resolve discount_type (No Discount/Percentage/Amount) into ERPNext fields.
+
+	Args:
+		payload: dict with optional discount_type, discount_percentage, discount_amount.
+		label: string prefix for error messages (e.g., "Item 1", "Invoice").
+
+	Returns:
+		dict with discount fields to merge (e.g., {"discount_percentage": 10}) or {} if No Discount.
+		Throws frappe.ValidationError on invalid discount_type, missing/out-of-range values.
+	"""
+	discount_type = (payload.get("discount_type") or "").strip() or "No Discount"
+
+	if discount_type not in ("No Discount", "Percentage", "Amount"):
+		frappe.throw(_("{0}: Invalid discount_type '{1}'. Must be 'No Discount', 'Percentage', or 'Amount'.").format(label, discount_type))
+
+	if discount_type == "No Discount":
+		return {}
+
+	if discount_type == "Percentage":
+		try:
+			discount_percentage = float(payload.get("discount_percentage") or 0)
+		except (TypeError, ValueError):
+			frappe.throw(_("{0}: discount_percentage must be a valid number.").format(label))
+		if discount_percentage <= 0 or discount_percentage > 100:
+			frappe.throw(_("{0}: discount_percentage must be between 0 and 100.").format(label))
+		return {"discount_percentage": discount_percentage}
+
+	if discount_type == "Amount":
+		try:
+			discount_amount = float(payload.get("discount_amount") or 0)
+		except (TypeError, ValueError):
+			frappe.throw(_("{0}: discount_amount must be a valid number.").format(label))
+		if discount_amount <= 0:
+			frappe.throw(_("{0}: discount_amount must be greater than 0.").format(label))
+		return {"discount_amount": discount_amount}
+
+
+def _get_invoice_discount_fields(data):
+	"""Resolve invoice-level discount into ERPNext fields."""
+	discount_fields = _resolve_discount(data, _("Invoice"))
+	if discount_fields:
+		discount_fields["apply_discount_on"] = "Grand Total"
+	return discount_fields
 
 
 def _prorate_payments(payments, ratio, precision):
@@ -92,6 +138,9 @@ def create_sales_invoice(**kwargs):
 	_validate_rows(data.get("items"), "Items", "item_code", "qty")
 	_validate_rows(data.get("payments"), "Payments", "mode_of_payment", "amount")
 
+	item_discounts = [_resolve_discount(item, _("Item {0}").format(idx)) for idx, item in enumerate(data["items"], 1)]
+	invoice_discount = _get_invoice_discount_fields(data)
+
 	try:
 		doc = frappe.get_doc({
 			"doctype": "Sales Invoice",
@@ -103,7 +152,11 @@ def create_sales_invoice(**kwargs):
 			"posting_date": data.get("posting_date"),
 			"remarks": data.get("remarks"),
 			"set_warehouse": data.get("warehouse"),
-			"items": [{"item_code": i["item_code"], "qty": i["qty"]} for i in data["items"]],
+			"items": [
+				{"item_code": i["item_code"], "qty": i["qty"], **item_discounts[idx]}
+				for idx, i in enumerate(data["items"])
+			],
+			**invoice_discount,
 		})
 		doc.set_missing_values()
 

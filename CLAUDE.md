@@ -42,3 +42,7 @@ All application code lives under `luxury_api/api/`, one module per concern. Ever
 When adding a new endpoint module, follow the existing convention: one file per resource under `api/`, whitelisted top-level functions as the public surface, and `_`-prefixed module-private helpers for query logic — keep bulk lookups batched (`frappe.get_all` with `["in", ...]` filters) instead of looping per record.
 
 `hooks.py` is currently the stock scaffold (no `doc_events`, `scheduler_events`, or fixtures configured) — this app does not yet hook into any DocType lifecycle or run scheduled jobs.
+
+## Git Restrictions
+
+Claude must NOT run `git add .` or `git commit` — the user will stage and commit changes manually. Do not commit code on the user's behalf.
