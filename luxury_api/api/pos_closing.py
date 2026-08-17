@@ -1,8 +1,14 @@
 import frappe
 from datetime import datetime
-from erpnext.accounts.doctype.pos_closing_entry.pos_closing_entry import make_closing_entry_from_opening
+from erpnext.accounts.doctype.pos_closing_entry.pos_closing_entry import (
+	get_payments,
+	get_taxes,
+)
 from frappe import _
 from frappe.utils import flt
+from frappe.query_builder import DocType
+from frappe.query_builder import functions as fn
+from frappe.query_builder.custom import ConstantColumn
 
 
 @frappe.whitelist(allow_guest=False, methods=["GET"])
@@ -147,7 +153,7 @@ def create_pos_closing_entry(
 
 	try:
 		opening_entry = frappe.get_doc("POS Opening Entry", pos_opening_entry)
-		closing_entry = make_closing_entry_from_opening(opening_entry)
+		closing_entry = _make_closing_entry_from_opening_multi_user(opening_entry)
 
 		_seed_opening_amounts(closing_entry, opening_entry)
 		_apply_default_closing_amounts(closing_entry)
@@ -212,3 +218,120 @@ def _apply_user_closing_amounts(closing_entry, payment_reconciliation):
 
 		row.closing_amount = flt(closing_amount)
 		row.difference = row.closing_amount - row.expected_amount
+
+
+def _build_invoice_query(invoice_doctype, pos_profile, start, end):
+	"""Build invoice query without owner filter, to support multi-cashier POS sessions."""
+	InvoiceDocType = DocType(invoice_doctype)
+	query = (
+		frappe.qb.from_(InvoiceDocType)
+		.select(
+			InvoiceDocType.name,
+			InvoiceDocType.customer,
+			InvoiceDocType.posting_date,
+			InvoiceDocType.grand_total,
+			InvoiceDocType.net_total,
+			InvoiceDocType.total_qty,
+			InvoiceDocType.total_taxes_and_charges,
+			InvoiceDocType.change_amount,
+			InvoiceDocType.account_for_change_amount,
+			InvoiceDocType.is_return,
+			InvoiceDocType.return_against,
+			fn.Timestamp(InvoiceDocType.posting_date, InvoiceDocType.posting_time).as_("timestamp"),
+			ConstantColumn(invoice_doctype).as_("doctype"),
+		)
+		.where(
+			(InvoiceDocType.docstatus == 1)
+			& (InvoiceDocType.is_pos == 1)
+			& (InvoiceDocType.pos_profile == pos_profile)
+			& (
+				(fn.Timestamp(InvoiceDocType.posting_date, InvoiceDocType.posting_time) >= start)
+				& (fn.Timestamp(InvoiceDocType.posting_date, InvoiceDocType.posting_time) <= end)
+			)
+		)
+	)
+
+	if invoice_doctype == "POS Invoice":
+		query = query.where(fn.IfNull(InvoiceDocType.consolidated_invoice, "").eq(""))
+	else:
+		query = query.where(
+			(InvoiceDocType.is_created_using_pos == 1)
+			& fn.IfNull(InvoiceDocType.pos_closing_entry, "").eq("")
+		)
+
+	return query
+
+
+def _get_invoices_multi_user(start, end, pos_profile):
+	"""Fetch invoices without owner filter, supporting multi-cashier POS sessions."""
+	sales_inv_query = _build_invoice_query("Sales Invoice", pos_profile, start, end)
+	pos_inv_query = _build_invoice_query("POS Invoice", pos_profile, start, end)
+	query = (sales_inv_query + pos_inv_query).orderby(sales_inv_query.timestamp)
+	invoices = query.run(as_dict=1)
+	return {"invoices": invoices, "payments": get_payments(invoices), "taxes": get_taxes(invoices)}
+
+
+def _make_closing_entry_from_opening_multi_user(opening_entry):
+	"""Build closing entry including invoices from all users in the POS Profile."""
+	closing_entry = frappe.new_doc("POS Closing Entry")
+	closing_entry.pos_opening_entry = opening_entry.name
+	closing_entry.period_start_date = opening_entry.period_start_date
+	closing_entry.period_end_date = frappe.utils.get_datetime()
+	closing_entry.pos_profile = opening_entry.pos_profile
+	closing_entry.user = opening_entry.user
+	closing_entry.company = opening_entry.company
+	closing_entry.grand_total = 0
+	closing_entry.net_total = 0
+	closing_entry.total_quantity = 0
+	closing_entry.total_taxes_and_charges = 0
+
+	data = _get_invoices_multi_user(
+		closing_entry.period_start_date,
+		closing_entry.period_end_date,
+		closing_entry.pos_profile,
+	)
+
+	pos_invoices = []
+	sales_invoices = []
+	taxes = [
+		frappe._dict({"account_head": tx.account_head, "amount": tx.tax_amount}) for tx in data.get("taxes")
+	]
+	payments = [
+		frappe._dict(
+			{
+				"mode_of_payment": p.mode_of_payment,
+				"opening_amount": 0,
+				"expected_amount": p.amount,
+			}
+		)
+		for p in data.get("payments")
+	]
+
+	for d in data.get("invoices"):
+		invoice = "pos_invoice" if d.doctype == "POS Invoice" else "sales_invoice"
+		invoice_data = frappe._dict(
+			{
+				invoice: d.name,
+				"posting_date": d.posting_date,
+				"grand_total": d.grand_total,
+				"customer": d.customer,
+				"is_return": d.is_return,
+				"return_against": d.return_against,
+			}
+		)
+		if d.doctype == "POS Invoice":
+			pos_invoices.append(invoice_data)
+		else:
+			sales_invoices.append(invoice_data)
+
+		closing_entry.grand_total += flt(d.grand_total)
+		closing_entry.net_total += flt(d.net_total)
+		closing_entry.total_quantity += flt(d.total_qty)
+		closing_entry.total_taxes_and_charges += flt(d.total_taxes_and_charges)
+
+	closing_entry.set("pos_invoices", pos_invoices)
+	closing_entry.set("sales_invoices", sales_invoices)
+	closing_entry.set("payment_reconciliation", payments)
+	closing_entry.set("taxes", taxes)
+
+	return closing_entry
