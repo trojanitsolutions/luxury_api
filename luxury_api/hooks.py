@@ -8,7 +8,7 @@ app_license = "mit"
 # Apps
 # ------------------
 
-required_apps = ["dms"]
+# required_apps = ["dms"]
 
 after_install = "luxury_api.customizations.pos_profile_custom.create_custom_fields"
 after_uninstall = "luxury_api.customizations.pos_profile_custom.delete_custom_fields"
