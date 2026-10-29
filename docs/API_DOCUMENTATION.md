@@ -22,14 +22,16 @@ All endpoints are Frappe whitelisted methods, called as:
    - [create_customer](#create_customer)
 5. [Item APIs](#item-apis)
    - [get_items](#get_items)
-6. [POS APIs](#pos-apis)
+6. [Item Price APIs](#item-price-apis)
+   - [get_item_prices](#get_item_prices)
+7. [POS APIs](#pos-apis)
    - [get_pos_profile](#get_pos_profile)
-7. [POS Opening APIs](#pos-opening-apis)
+8. [POS Opening APIs](#pos-opening-apis)
    - [create_pos_opening_entry](#create_pos_opening_entry)
-8. [POS Closing APIs](#pos-closing-apis)
+9. [POS Closing APIs](#pos-closing-apis)
    - [create_pos_closing_entry](#create_pos_closing_entry)
-9. [Error Reference](#error-reference)
-10. [API Summary Table](#api-summary-table)
+10. [Error Reference](#error-reference)
+11. [API Summary Table](#api-summary-table)
 
 ---
 
@@ -46,6 +48,9 @@ Paginated customer search/listing (matches on name, customer name, or linked con
 
 ### Item APIs (`api/item.py`)
 Paginated sales item listing with search (name/barcode), per-warehouse stock (`Bin`), selling price (`Item Price`), barcodes, and image resolution (explicit `image` field or first attached `File`).
+
+### Item Price APIs (`api/item_price.py`)
+Item Price lookup by branch or Price List. Price Lists with no branch are common to all branches; a branch price overrides the common price for the same item and UOM. Pagination is optional.
 
 ### POS APIs (`api/pos.py`)
 Read-only lookup of one or more POS Profiles (by name or branch) with resolved company address, configured payment modes (with default GL account), and the list of users the profile applies to.
@@ -800,6 +805,206 @@ Invalid Item Group (`frappe.DoesNotExistError`, HTTP 404):
 
 ---
 
+## Item Price APIs
+
+### get_item_prices
+
+#### Purpose
+Returns Item Price records for a branch or a specific Price List. Price Lists with no branch are common: their prices apply to all branches. When an item has both a branch price and a common price for the same UOM, the branch price wins. Pagination is optional.
+
+#### Endpoint
+```
+GET {base_url}/api/method/luxury_api.api.item_price.get_item_prices
+```
+
+#### Authentication
+Login session required (`allow_guest=False`).
+
+#### Request Headers
+```http
+Authorization: token <api_key>:<api_secret>
+```
+
+#### Request Payload / Query Parameters
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `branch` | string | No | Existing Branch. Returns that branch's price lists plus common price lists |
+| `price_list` | string | No | Existing Price List. Returns only this list; takes priority over `branch` |
+| `item_code` | string | No | Exact item code filter |
+| `search` | string | No | Matches item code or item name (`LIKE`) |
+| `page` | int | No | Page number. If `page` or `page_size` is sent, the response is paginated |
+| `page_size` | int | No | Page size (default `20` when paginating, max `500`) |
+
+If neither `branch` nor `price_list` is sent, only common price lists are used.
+If neither `page` nor `page_size` is sent, all matching rows are returned.
+
+#### Sample cURL
+```bash
+# All prices for a branch (no pagination)
+curl --location '{base_url}/api/method/luxury_api.api.item_price.get_item_prices?branch=Branch%20-%201' \
+--header 'Authorization: token api_key:api_secret'
+
+# Paginated
+curl --location '{base_url}/api/method/luxury_api.api.item_price.get_item_prices?branch=Branch%20-%201&page=1&page_size=50' \
+--header 'Authorization: token api_key:api_secret'
+
+# Specific price list
+curl --location '{base_url}/api/method/luxury_api.api.item_price.get_item_prices?price_list=Standard%20Selling' \
+--header 'Authorization: token api_key:api_secret'
+```
+
+#### Success Response
+```json
+{
+    "message": {
+        "success": true,
+        "branch_price_lists": ["Branch 1 Selling"],
+        "common_price_lists": ["Common Selling"],
+        "data": [
+            {
+                "name": "ITEM-PRICE-0001",
+                "item_code": "ITEM-001",
+                "item_name": "Gold Watch",
+                "item_description": "18k gold wristwatch",
+                "uom": "Nos",
+                "price_list": "Branch 1 Selling",
+                "price_list_rate": 48000.0,
+                "currency": "INR",
+                "selling": 1,
+                "buying": 0,
+                "valid_from": "2026-01-01",
+                "valid_upto": null,
+                "customer": null,
+                "batch_no": null,
+                "is_branch_price": true
+            },
+            {
+                "name": "ITEM-PRICE-0002",
+                "item_code": "ITEM-002",
+                "item_name": "Silver Ring",
+                "item_description": "Sterling silver ring",
+                "uom": "Nos",
+                "price_list": "Common Selling",
+                "price_list_rate": 5000.0,
+                "currency": "INR",
+                "selling": 1,
+                "buying": 0,
+                "valid_from": "2026-01-01",
+                "valid_upto": null,
+                "customer": null,
+                "batch_no": null,
+                "is_branch_price": false
+            }
+        ],
+        "message": null,
+        "pagination": {
+            "page": 1,
+            "page_size": 50,
+            "total_records": 2,
+            "total_pages": 1,
+            "has_next": false,
+            "has_previous": false
+        }
+    }
+}
+```
+
+`pagination` is present only when `page` or `page_size` is sent. When no rows match, `data` is `[]` and `message` is `"No item prices found."`.
+
+#### Error Responses
+
+Price List does not exist (`frappe.DoesNotExistError`, HTTP 404):
+```json
+{
+    "exc_type": "DoesNotExistError",
+    "_server_messages": "[\"Price List 'Nonexistent' does not exist.\"]"
+}
+```
+
+Branch does not exist (`frappe.DoesNotExistError`, HTTP 404):
+```json
+{
+    "exc_type": "DoesNotExistError",
+    "_server_messages": "[\"Branch 'Nonexistent' does not exist.\"]"
+}
+```
+
+No branch or common price list available (`frappe.DoesNotExistError`, HTTP 404):
+```json
+{
+    "exc_type": "DoesNotExistError",
+    "_server_messages": "[\"No Price List found for Branch 'Branch - 1'.\"]"
+}
+```
+
+#### Business Logic
+1. `_resolve_price_lists`:
+   - If `price_list` is given, validate it exists and use only it.
+   - Else fetch common price lists: enabled, `selling=1`, `branch` not set.
+   - If `branch` is given, validate it exists and fetch its price lists: enabled, `selling=1`, `branch=<branch>`. Throw if neither branch nor common price lists exist.
+2. `_fetch_item_prices`: fetch `Item Price` rows for all resolved price lists, with optional `item_code` and `search` filters, ordered by `item_code asc`.
+3. `_prefer_branch_prices`: for each `(item_code, uom)` that has a branch price, drop the common price row. Mark each row with `is_branch_price`.
+4. If `page` or `page_size` is sent, `_paginate` slices the result and adds pagination metadata.
+
+#### Database / DocTypes Used
+- `Price List` (custom field `branch`)
+- `Branch` (existence check)
+- `Item Price`
+
+#### Input Parameters
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `branch` | string | No | Branch name |
+| `price_list` | string | No | Price List name; overrides `branch` |
+| `item_code` | string | No | Exact item code |
+| `search` | string | No | Item code/name search |
+| `page` | int | No | Enables pagination; default 1 |
+| `page_size` | int | No | Enables pagination; default 20, max 500 |
+
+#### Response Fields
+
+| Field | Type | Description |
+|---|---|---|
+| `success` | bool | Always `true` on success |
+| `branch_price_lists` | array\<string\> | Branch price lists used (or the requested `price_list`) |
+| `common_price_lists` | array\<string\> | Common (no-branch) price lists used |
+| `data[].name` | string | Item Price ID |
+| `data[].item_code` | string | Item code |
+| `data[].item_name` | string | Item name |
+| `data[].item_description` | string | Item description |
+| `data[].uom` | string | Unit of measure |
+| `data[].price_list` | string | Price List the rate came from |
+| `data[].price_list_rate` | float | Rate |
+| `data[].currency` | string | Currency |
+| `data[].selling` / `data[].buying` | int (0/1) | Price type flags |
+| `data[].valid_from` / `data[].valid_upto` | date\|null | Validity period |
+| `data[].customer` | string\|null | Customer-specific price |
+| `data[].batch_no` | string\|null | Batch-specific price |
+| `data[].is_branch_price` | bool | `true` if from a branch price list, `false` if from a common one |
+| `message` | string\|null | `"No item prices found."` when `data` is empty |
+| `pagination.*` | — | Same shape as `get_customers`; present only when paginating |
+
+#### Sequence Flow
+1. Resolve branch and common price lists.
+2. Fetch matching Item Price rows.
+3. Remove common prices that a branch price overrides.
+4. Paginate if `page` or `page_size` is sent.
+5. Return the response.
+
+#### Functional Notes
+- Used by POS to load prices for the current branch. Items without a branch price use the common price, so the same price applies across all branches.
+- To make a price list common, leave its `branch` field empty.
+
+#### Technical Notes
+- **HTTP Method:** `GET` only (`methods=["GET"]`). Send parameters in the query string.
+- **Python Function:** `luxury_api.api.item_price.get_item_prices`
+- **Performance:** All matching rows are fetched before branch/common deduplication; pagination is applied in Python after that.
+- **Sorting:** `item_code asc`.
+
+---
+
 ## POS APIs
 
 ### get_pos_profile
@@ -1316,6 +1521,7 @@ Unexpected failure (HTTP 500), rolled back and logged (`title="luxury_api.pos_cl
 | Invalid login credentials | 401 | `frappe.AuthenticationError` exception payload |
 | Role does not exist (`get_users`) | 404 | `frappe.DoesNotExistError` exception payload |
 | Item Group does not exist (`get_items`) | 404 | `frappe.DoesNotExistError` exception payload |
+| Price List / Branch does not exist, or no price list for branch (`get_item_prices`) | 404 | `frappe.DoesNotExistError` exception payload |
 | POS Profile not found / no profile for branch / none exist (`get_pos_profile`) | 404 | `frappe.DoesNotExistError` exception payload |
 | Missing mandatory fields (`create_customer`, `create_pos_opening_entry`, `create_pos_closing_entry`) | 400 | `{"success": false, "message": "..."}` |
 | Duplicate customer mobile number (`create_customer`) | 409 | `{"success": false, "message": "...", "customer": {...}}` |
@@ -1344,6 +1550,7 @@ Frappe's default exception payload shape (for uncaught `frappe.throw`/core excep
 | `get_customers` | GET | `luxury_api.api.customer.get_customers` | Session | No |
 | `create_customer` | POST | `luxury_api.api.customer.create_customer` | Session | Creates `Customer`, `Contact` |
 | `get_items` | GET | `luxury_api.api.item.get_items` | Session | No |
+| `get_item_prices` | GET | `luxury_api.api.item_price.get_item_prices` | Session | No |
 | `get_pos_profile` | GET | `luxury_api.api.pos.get_pos_profile` | Session | No |
 | `create_pos_opening_entry` | POST | `luxury_api.api.pos_opening.create_pos_opening_entry` | Session | Creates & submits `POS Opening Entry` |
 | `create_pos_closing_entry` | POST | `luxury_api.api.pos_closing.create_pos_closing_entry` | Session | Creates draft `POS Closing Entry` |
