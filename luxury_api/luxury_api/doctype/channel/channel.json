@@ -7,7 +7,8 @@
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
-  "channel_name"
+  "channel_name",
+  "allow_credit"
  ],
  "fields": [
   {
@@ -16,12 +17,19 @@
    "fieldtype": "Data",
    "label": "Channel Name",
    "unique": 1
+  },
+  {
+   "default": "0",
+   "description": "Allow sales on this channel to be partly paid or unpaid (credit). Keep unchecked for the POS counter.",
+   "fieldname": "allow_credit",
+   "fieldtype": "Check",
+   "label": "Allow Credit Sales"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-10-29 11:16:19.169479",
+ "modified": "2026-10-29 15:00:00.000000",
  "modified_by": "Administrator",
  "module": "Luxury API",
  "name": "Channel",

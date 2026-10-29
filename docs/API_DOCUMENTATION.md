@@ -30,8 +30,10 @@ All endpoints are Frappe whitelisted methods, called as:
    - [create_pos_opening_entry](#create_pos_opening_entry)
 9. [POS Closing APIs](#pos-closing-apis)
    - [create_pos_closing_entry](#create_pos_closing_entry)
-10. [Error Reference](#error-reference)
-11. [API Summary Table](#api-summary-table)
+10. [Credit Sales](#credit-sales)
+   - [Credit option on create_sales_invoice](#credit-option-on-create_sales_invoice)
+11. [Error Reference](#error-reference)
+12. [API Summary Table](#api-summary-table)
 
 ---
 
@@ -60,6 +62,9 @@ Creates and submits a POS Opening Entry (opening cash/payment-mode balances) for
 
 ### POS Closing APIs (`api/pos_closing.py`)
 Creates a POS Closing Entry from an open POS Opening Entry, defaulting each payment mode's closing amount to its system-expected amount (zero difference).
+
+### Credit Sales (`api/sales_invoice_pos.py`)
+Credit (unpaid or partly paid) sales through `create_sales_invoice` for channels that allow credit.
 
 ---
 
@@ -1511,6 +1516,80 @@ Unexpected failure (HTTP 500), rolled back and logged (`title="luxury_api.pos_cl
 - **Delegation:** Reuses ERPNext's own `erpnext.accounts.doctype.pos_closing_entry.pos_closing_entry.make_closing_entry_from_opening` rather than re-implementing expected-amount calculation.
 - **Document lifecycle:** Insert-only (draft, `docstatus=0`) — submission is a separate step not exposed here.
 - **Transaction handling:** `frappe.db.rollback()` on both `ValidationError` (→ 400) and generic exceptions (→ 500, logged).
+
+---
+
+## Credit Sales
+
+Credit sales are controlled by the **Channel** of the sale. Channel is an Accounting Dimension, so Sales Invoice and GL Entry carry a `channel` field.
+
+### Setup
+
+| Where | Setting | Value |
+|---|---|---|
+| Channel | Allow Credit Sales (`allow_credit`) | Check for non-POS channels (for example Wholesale). Keep unchecked for the POS counter. |
+| POS Profile | Allow Partial Payment | Check on every POS Profile used for credit sales. |
+| Customer | Credit Limit (per company) | Optional. ERPNext blocks the invoice on submit if the limit is exceeded. |
+
+---
+
+### Credit option on create_sales_invoice
+
+#### Endpoint
+```
+POST {base_url}/api/method/luxury_api.api.sales_invoice_pos.create_sales_invoice
+```
+
+#### New Parameter
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `channel` | string | No | Existing Channel. Stored on the invoice (accounting dimension). |
+
+#### Behavior
+
+| Channel | Payments | Result |
+|---|---|---|
+| None, or `allow_credit = 0` | Must have at least one row with `amount > 0` | Unchanged: if the paid total is less than the grand total, the first payment row is raised to the grand total (paid in full). |
+| `allow_credit = 1` | Optional. Rows may have `amount = 0` | The invoice is submitted with what was paid; the rest stays as `outstanding_amount`. If `payments` is empty, the POS Profile's default mode of payment is added with amount `0`. |
+
+Credit validations (HTTP 400 unless noted):
+- Channel does not exist → 404 (`DoesNotExistError`).
+- Customer is the POS Profile's default (walk-in) customer.
+- POS Profile does not have **Allow Partial Payment** enabled.
+- Total payment is more than the invoice total.
+- Customer credit limit exceeded (ERPNext validation on submit).
+
+#### Sample cURL (full credit)
+```bash
+curl --location '{base_url}/api/method/luxury_api.api.sales_invoice_pos.create_sales_invoice' \
+--header 'Authorization: token api_key:api_secret' \
+--header 'Content-Type: application/json' \
+--data '{
+    "customer": "CUST-0001",
+    "company": "Luxury Pvt Ltd",
+    "pos_profile": "Branch 1 POS",
+    "channel": "Wholesale",
+    "items": [{"item_code": "ITEM-001", "qty": 1}],
+    "payments": []
+}'
+```
+
+#### Sample cURL (partial payment)
+```bash
+--data '{
+    "customer": "CUST-0001",
+    "company": "Luxury Pvt Ltd",
+    "pos_profile": "Branch 1 POS",
+    "channel": "Wholesale",
+    "items": [{"item_code": "ITEM-001", "qty": 1}],
+    "payments": [{"mode_of_payment": "Cash", "amount": 10000}]
+}'
+```
+
+The response `data` is the full Sales Invoice; read `paid_amount` and `outstanding_amount` from it.
+
+`list_sales_invoices` also accepts a `channel` filter and returns `channel` and `outstanding_amount` for each row. Use it to see unpaid invoices. Collect the remaining amount in ERPNext with a Payment Entry against the invoice.
 
 ---
 

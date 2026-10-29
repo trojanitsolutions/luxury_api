@@ -4,7 +4,7 @@ from datetime import datetime
 from frappe import _
 from frappe.utils import flt, cint
 
-FIELDS = ("customer", "company", "pos_profile", "items", "payments", "warehouse", "posting_date", "remarks", "update_stock", "discount_type", "discount_percentage", "discount_amount")
+FIELDS = ("customer", "company", "pos_profile", "items", "payments", "warehouse", "posting_date", "remarks", "update_stock", "discount_type", "discount_percentage", "discount_amount", "channel")
 RETURN_FIELDS = ("original_invoice", "posting_date", "posting_time", "remarks", "update_stock", "set_posting_time", "items")
 
 
@@ -41,6 +41,55 @@ def _validate_rows(rows, label, text_field, num_field):
 				frappe.throw(_("Row {0}: {1} must be greater than 0.").format(idx, num_field))
 		except (TypeError, ValueError):
 			frappe.throw(_("Row {0}: {1} must be a valid number.").format(idx, num_field))
+
+
+def _validate_credit_payments(rows):
+	"""Credit sales may send no payments, or payment rows with amount 0 or more."""
+	if rows in (None, ""):
+		return
+	if not isinstance(rows, list):
+		frappe.throw(_("Payments must be a list."))
+	for idx, row in enumerate(rows, 1):
+		if not row.get("mode_of_payment"):
+			frappe.throw(_("Row {0}: mode_of_payment is required.").format(idx))
+		try:
+			if float(row.get("amount") or 0) < 0:
+				frappe.throw(_("Row {0}: amount must not be negative.").format(idx))
+		except (TypeError, ValueError):
+			frappe.throw(_("Row {0}: amount must be a valid number.").format(idx))
+
+
+def _is_credit_channel(channel):
+	"""Return True if the Channel allows credit sales. No channel means no credit."""
+	if not channel:
+		return False
+	allow_credit = frappe.db.get_value("Channel", channel, "allow_credit")
+	if allow_credit is None:
+		frappe.throw(_("Channel '{0}' does not exist.").format(channel), frappe.DoesNotExistError)
+	return bool(cint(allow_credit))
+
+
+def _validate_credit_sale(customer, pos_profile):
+	"""Credit needs a real customer and a POS Profile that allows partial payment."""
+	default_customer, allow_partial_payment = frappe.db.get_value(
+		"POS Profile", pos_profile, ["customer", "allow_partial_payment"]
+	) or (None, 0)
+	if default_customer and customer == default_customer:
+		frappe.throw(_("Credit sales are not allowed for the default customer '{0}'.").format(customer))
+	if not cint(allow_partial_payment):
+		frappe.throw(_("POS Profile '{0}' must have 'Allow Partial Payment' enabled for credit sales.").format(pos_profile))
+
+
+def _get_default_mode_of_payment(pos_profile):
+	modes = frappe.get_all(
+		"POS Payment Method",
+		filters={"parent": pos_profile, "parenttype": "POS Profile"},
+		fields=["mode_of_payment", "default"],
+		order_by="idx asc",
+	)
+	if not modes:
+		frappe.throw(_("POS Profile '{0}' has no payment methods.").format(pos_profile))
+	return next((m.mode_of_payment for m in modes if m.default), modes[0].mode_of_payment)
 
 
 def _resolve_discount(payload, label):
@@ -135,8 +184,15 @@ def create_sales_invoice(**kwargs):
 		if not value:
 			frappe.throw(_("{0} is required.").format(label))
 
+	channel = (data.get("channel") or "").strip() or None
+	is_credit = _is_credit_channel(channel)
+
 	_validate_rows(data.get("items"), "Items", "item_code", "qty")
-	_validate_rows(data.get("payments"), "Payments", "mode_of_payment", "amount")
+	if is_credit:
+		_validate_credit_sale(customer, pos_profile)
+		_validate_credit_payments(data.get("payments"))
+	else:
+		_validate_rows(data.get("payments"), "Payments", "mode_of_payment", "amount")
 
 	item_discounts = [_resolve_discount(item, _("Item {0}").format(idx)) for idx, item in enumerate(data["items"], 1)]
 	invoice_discount = _get_invoice_discount_fields(data)
@@ -147,6 +203,7 @@ def create_sales_invoice(**kwargs):
 			"customer": customer,
 			"company": company,
 			"pos_profile": pos_profile,
+			"channel": channel,
 			"is_pos": 1,
 			"is_created_using_pos": 1,
 			"posting_date": data.get("posting_date"),
@@ -162,15 +219,22 @@ def create_sales_invoice(**kwargs):
 
 		# Properly add payment rows (using append for correct child table registration)
 		doc.set("payments", [])
-		for p in data.get("payments", []):
+		for p in data.get("payments") or []:
 			payment_amount = flt(p.get("amount") or 0)
 			doc.append("payments", {
 				"mode_of_payment": p.get("mode_of_payment"),
 				"amount": payment_amount,
 			})
 
-		# Auto-fill payment amount from grand_total if not explicitly provided or insufficient
-		if doc.payments:
+		if is_credit:
+			# ERPNext needs at least one payment row on a POS invoice, even if nothing is paid now
+			if not doc.payments:
+				doc.append("payments", {"mode_of_payment": _get_default_mode_of_payment(pos_profile), "amount": 0})
+			invoice_total = flt(doc.rounded_total) or flt(doc.grand_total)
+			if sum(flt(p.amount) for p in doc.payments) > invoice_total:
+				frappe.throw(_("Total payment cannot be more than the invoice total {0} for a credit sale.").format(invoice_total))
+		elif doc.payments:
+			# Auto-fill payment amount from grand_total if not explicitly provided or insufficient
 			total_paid = sum(flt(p.amount or 0) for p in doc.payments)
 			if not total_paid or total_paid < flt(doc.grand_total or 0):
 				doc.payments[0].amount = flt(doc.grand_total or 0)
@@ -233,6 +297,7 @@ def list_sales_invoices(
 	to_date: str | None = None,
 	status: str | None = None,
 	pos_profile: str | None = None,
+	channel: str | None = None,
 	page: int | str = 1,
 	page_length: int | str = 20,
 	order_by: str = "posting_date",
@@ -253,7 +318,7 @@ def list_sales_invoices(
 			filters.append(["posting_date", op, value])
 			applied[key] = value
 
-	for key, value in (("company", company), ("customer", customer), ("status", status), ("pos_profile", pos_profile)):
+	for key, value in (("company", company), ("customer", customer), ("status", status), ("pos_profile", pos_profile), ("channel", channel)):
 		if value:
 			filters.append([key, "=", value])
 			applied[key] = value
@@ -279,7 +344,7 @@ def list_sales_invoices(
 		data = frappe.get_list(
 			"Sales Invoice",
 			filters=filters or None,
-			fields=["name", "customer", "company", "pos_profile", "posting_date", "grand_total", "status", "docstatus"],
+			fields=["name", "customer", "company", "pos_profile", "channel", "posting_date", "grand_total", "outstanding_amount", "status", "docstatus"],
 			order_by=f"{order_by} {order}",
 			limit_start=(page - 1) * page_length,
 			limit_page_length=page_length,
