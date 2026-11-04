@@ -2,6 +2,7 @@ import math
 
 import frappe
 from frappe import _
+from frappe.utils import cint
 
 ITEM_PRICE_FIELDS = [
 	"name",
@@ -20,6 +21,8 @@ ITEM_PRICE_FIELDS = [
 	"batch_no",
 ]
 
+PRICE_LIST_FIELDS = ["name", "price_list_name", "currency", "branch", "selling", "buying", "enabled"]
+
 
 @frappe.whitelist(methods=["GET"], allow_guest=False)
 def get_item_prices(branch: str = None, price_list: str = None, item_code: str = None, search: str = None, page=None, page_size=None):
@@ -37,6 +40,43 @@ def get_item_prices(branch: str = None, price_list: str = None, item_code: str =
 	if page or page_size:
 		response["data"], response["pagination"] = _paginate(rows, page, page_size)
 	return response
+
+
+@frappe.whitelist(methods=["GET"], allow_guest=False)
+def get_price_lists(branch: str = None, include_common=1):
+	if branch:
+		_validate_branch(branch)
+
+	rows = _fetch_branch_price_lists(branch, cint(include_common))
+	return {
+		"success": True,
+		"branch": branch,
+		"data": rows,
+		"message": None if rows else "No price lists found.",
+	}
+
+
+def _validate_branch(branch):
+	if not frappe.db.exists("Branch", branch):
+		frappe.throw(_("Branch '{0}' does not exist.").format(branch), frappe.DoesNotExistError)
+
+
+def _fetch_branch_price_lists(branch, include_common):
+	branch_conditions = []
+	if branch:
+		branch_conditions.append(["branch", "=", branch])
+	if include_common or not branch:
+		branch_conditions.append(["branch", "is", "not set"])
+
+	rows = frappe.get_all(
+		"Price List",
+		filters={"enabled": 1, "selling": 1},
+		or_filters=branch_conditions,
+		fields=PRICE_LIST_FIELDS,
+	)
+	for row in rows:
+		row.is_common = not row.branch
+	return sorted(rows, key=lambda row: (row.is_common, row.name))
 
 
 def _paginate(rows, page, page_size):
@@ -69,8 +109,7 @@ def _resolve_price_lists(branch, price_list):
 	if not branch:
 		return [], common_price_lists
 
-	if not frappe.db.exists("Branch", branch):
-		frappe.throw(_("Branch '{0}' does not exist.").format(branch), frappe.DoesNotExistError)
+	_validate_branch(branch)
 
 	branch_price_lists = frappe.get_all(
 		"Price List",

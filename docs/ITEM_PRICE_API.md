@@ -362,3 +362,85 @@ Other errors:
 
 - To make a price list apply to all branches, leave its `branch` field empty.
 - The API fetches all matching rows before it removes overridden common prices. Pagination is applied after that, so `total_records` counts rows after the override.
+
+---
+
+# Price List API
+
+Returns the Price List records for a branch. It does not return item rates. To get rates, use `get_item_prices`.
+
+## Endpoint
+
+```
+GET /api/method/luxury_api.api.item_price.get_price_lists
+```
+
+Authentication is the same as `get_item_prices`.
+
+## Query Parameters
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `branch` | string | No | — | Existing Branch name. Returns the price lists for this branch. |
+| `include_common` | int (0/1) | No | `1` | Set to `0` to return only the branch price lists. |
+
+### Rules
+
+- The API returns only enabled selling Price Lists.
+- If you do not send `branch`, the API returns only the common price lists (with an empty `branch` field).
+- Branch price lists come first, then common price lists. Each group is sorted by name.
+
+## Examples
+
+```bash
+# Branch and common price lists
+curl --location '{base_url}/api/method/luxury_api.api.item_price.get_price_lists?branch=Branch%20-%201' \
+--header 'Authorization: token api_key:api_secret'
+
+# Branch price lists only
+curl --location '{base_url}/api/method/luxury_api.api.item_price.get_price_lists?branch=Branch%20-%201&include_common=0' \
+--header 'Authorization: token api_key:api_secret'
+```
+
+## Success Response
+
+```json
+{
+    "message": {
+        "success": true,
+        "branch": "Branch - 1",
+        "data": [
+            {
+                "name": "Branch 1 Selling",
+                "price_list_name": "Branch 1 Selling",
+                "currency": "INR",
+                "branch": "Branch - 1",
+                "selling": 1,
+                "buying": 0,
+                "enabled": 1,
+                "is_common": false
+            },
+            {
+                "name": "Standard Selling",
+                "price_list_name": "Standard Selling",
+                "currency": "INR",
+                "branch": null,
+                "selling": 1,
+                "buying": 0,
+                "enabled": 1,
+                "is_common": true
+            }
+        ],
+        "message": null
+    }
+}
+```
+
+If there are no matching price lists, `data` is `[]` and `message` is `"No price lists found."`.
+
+## Error Responses
+
+| Case | Exception | HTTP |
+|---|---|---|
+| `branch` does not exist | `DoesNotExistError` — `Branch '<name>' does not exist.` | 404 |
+| Not logged in | `PermissionError` | 403 |
