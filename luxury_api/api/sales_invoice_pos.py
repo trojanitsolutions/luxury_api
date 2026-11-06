@@ -8,9 +8,11 @@ from luxury_api.customizations.sales_invoice_commission import (
 	auto_cancel_enabled,
 	auto_recover_enabled,
 	get_active_commission_je,
+	get_commission_amount,
+	get_sales_person,
 )
 
-FIELDS = ("customer", "company", "pos_profile", "items", "payments", "warehouse", "posting_date", "remarks", "update_stock", "discount_type", "discount_percentage", "discount_amount", "channel", "sales_partner", "commission_amount", "commission_paid")
+FIELDS = ("customer", "company", "pos_profile", "items", "payments", "warehouse", "posting_date", "remarks", "update_stock", "discount_type", "discount_percentage", "discount_amount", "channel", "sales_person", "commission_amount", "commission_paid")
 RETURN_FIELDS = ("original_invoice", "posting_date", "posting_time", "remarks", "update_stock", "set_posting_time", "items", "recover_commission")
 
 
@@ -147,23 +149,28 @@ def _get_invoice_discount_fields(data):
 def _resolve_commission(data):
 	"""Resolve the Sales Partner commission. Commission is always a fixed amount sent by the POS.
 
-	Returns (fields, amount). fields is {} when there is no partner. The amount is applied on the
+	Returns (fields, amount). fields is {} when there is no sales person. The amount is applied on the
 	invoice by the apply_fixed_commission validate hook, after ERPNext's own rate calculation.
 	"""
-	sales_partner = (data.get("sales_partner") or "").strip()
+	sales_person = (data.get("sales_person") or "").strip()
 	amount = data.get("commission_amount")
 	has_amount = amount not in (None, "")
 
-	if not sales_partner:
+	if not sales_person:
 		if has_amount:
-			frappe.throw(_("sales_partner is required when commission_amount is given."))
+			frappe.throw(_("sales_person is required when commission_amount is given."))
 		return {}, None
 
-	if not frappe.db.exists("Sales Partner", sales_partner):
-		frappe.throw(_("Sales Partner '{0}' does not exist.").format(sales_partner), frappe.DoesNotExistError)
+	person = frappe.db.get_value("Sales Person", sales_person, ["enabled", "is_group"], as_dict=True)
+	if not person:
+		frappe.throw(_("Sales Person '{0}' does not exist.").format(sales_person), frappe.DoesNotExistError)
+	if not person.enabled:
+		frappe.throw(_("Sales Person '{0}' is disabled.").format(sales_person))
+	if person.is_group:
+		frappe.throw(_("Sales Person '{0}' is a group. Select an individual sales person.").format(sales_person))
 
 	if not has_amount:
-		frappe.throw(_("commission_amount is required when sales_partner is given."))
+		frappe.throw(_("commission_amount is required when sales_person is given."))
 	try:
 		amount = float(amount)
 	except (TypeError, ValueError):
@@ -171,7 +178,7 @@ def _resolve_commission(data):
 	if amount <= 0:
 		frappe.throw(_("commission_amount must be greater than 0."))
 
-	return {"sales_partner": sales_partner}, amount
+	return {"sales_team": [{"sales_person": sales_person, "allocated_percentage": 100}]}, amount
 
 
 def _get_cash_mode_of_payment(pos_profile):
@@ -230,27 +237,27 @@ def _resolve_commission_payment(data, company, pos_profile):
 def _make_commission_journal_entry(invoice, payment):
 	"""Submit a Cash Entry linked to the invoice.
 
-	Sale:   Dr Commission Expense / Cr Cash  (commission paid to the partner)
-	Return: Dr Cash / Cr Commission Expense  (partner gives back the returned share)
-	The amount is abs(total_commission), which is negative on a return.
+	Sale:   Dr Commission Expense / Cr Cash  (commission paid to the sales person)
+	Return: Dr Cash / Cr Commission Expense  (sales person gives back the returned share)
+	The amount is abs(Sales Team incentives), which is negative on a return.
 	"""
 	from erpnext.accounts.doctype.accounting_dimension.accounting_dimension import get_accounting_dimensions
 
-	amount = abs(flt(invoice.total_commission))
+	amount = abs(get_commission_amount(invoice))
 	cost_center = payment["cost_center"] or invoice.cost_center
 	dimensions = {d: invoice.get(d) for d in get_accounting_dimensions() if invoice.get(d)}
 	debit_account, credit_account = payment["expense_account"], payment["paid_from_account"]
-	remark = _("Commission paid to Sales Partner {0} against {1}")
+	remark = _("Commission paid to Sales Person {0} against {1}")
 	if invoice.is_return:
 		debit_account, credit_account = credit_account, debit_account
-		remark = _("Commission recovered from Sales Partner {0} for return {1}")
+		remark = _("Commission recovered from Sales Person {0} for return {1}")
 
 	je = frappe.get_doc({
 		"doctype": "Journal Entry",
 		"voucher_type": "Cash Entry",
 		"company": invoice.company,
 		"posting_date": invoice.posting_date,
-		"user_remark": remark.format(invoice.sales_partner, invoice.name),
+		"user_remark": remark.format(get_sales_person(invoice), invoice.name),
 		"accounts": [
 			{"account": debit_account, "debit_in_account_currency": amount, "cost_center": cost_center, **dimensions},
 			{"account": credit_account, "credit_in_account_currency": amount, "cost_center": cost_center, **dimensions},
@@ -277,17 +284,14 @@ def _get_original_commission_payment(original_je):
 
 
 def _commission_recovery_check(original_invoice, recover_commission):
-	"""Decide whether a return recovers the partner's commission share.
+	"""Decide whether a return recovers the sales person's commission share.
 
 	Returns (original_je, recover, ask_response). original_je is None when no commission was paid.
 	ask_response is a 409 payload when the POS must ask the cashier (POS Profile set to "No"
 	and no recover_commission sent). An explicit recover_commission always wins.
 	"""
 	original = frappe.db.get_value(
-		"Sales Invoice",
-		original_invoice,
-		["commission_journal_entry", "pos_profile", "sales_partner", "total_commission"],
-		as_dict=True,
+		"Sales Invoice", original_invoice, ["commission_journal_entry", "pos_profile"], as_dict=True
 	)
 	original_je = get_active_commission_je(original)
 	if not original_je:
@@ -302,25 +306,39 @@ def _commission_recovery_check(original_invoice, recover_commission):
 		"success": False,
 		"requires_commission_decision": True,
 		"message": _(
-			"Commission was paid for this invoice. Send recover_commission = 1 if the partner gives back "
-			"the returned share, or 0 if the partner keeps it."
+			"Commission was paid for this invoice. Send recover_commission = 1 if the sales person gives back "
+			"the returned share, or 0 if the sales person keeps it."
 		),
-		"data": {
-			"commission_journal_entry": original_je,
-			"sales_partner": original.sales_partner,
-			"total_commission": original.total_commission,
-		},
+		"data": {"commission_journal_entry": original_je, **_get_commission_info([original_invoice])[original_invoice]},
 	}
 
 
 def _recover_commission(return_doc, original_je):
 	"""Submit the recovery Cash Entry for a return and record the cash mode on the return invoice."""
-	if flt(return_doc.total_commission) >= 0:
+	if get_commission_amount(return_doc) >= 0:
 		return
 	payment = _get_original_commission_payment(original_je)
 	original_mode = frappe.db.get_value("Sales Invoice", return_doc.return_against, "commission_mode_of_payment")
 	return_doc.db_set("commission_mode_of_payment", original_mode)
 	_make_commission_journal_entry(return_doc, payment)
+
+
+def _get_commission_info(invoice_names):
+	"""{invoice: {"sales_person", "commission_amount"}} from the Sales Team rows, in one query."""
+	info = {name: {"sales_person": None, "commission_amount": 0} for name in invoice_names}
+	if not invoice_names:
+		return info
+	rows = frappe.get_all(
+		"Sales Team",
+		filters={"parent": ["in", invoice_names], "parenttype": "Sales Invoice"},
+		fields=["parent", "sales_person", "incentives"],
+		order_by="idx asc",
+	)
+	for row in rows:
+		entry = info[row.parent]
+		entry["sales_person"] = entry["sales_person"] or row.sales_person
+		entry["commission_amount"] += flt(row.incentives)
+	return info
 
 
 def _prorate_payments(payments, ratio, precision):
@@ -495,7 +513,7 @@ def list_sales_invoices(
 	status: str | None = None,
 	pos_profile: str | None = None,
 	channel: str | None = None,
-	sales_partner: str | None = None,
+	sales_person: str | None = None,
 	page: int | str = 1,
 	page_length: int | str = 20,
 	order_by: str = "posting_date",
@@ -516,10 +534,19 @@ def list_sales_invoices(
 			filters.append(["posting_date", op, value])
 			applied[key] = value
 
-	for key, value in (("company", company), ("customer", customer), ("status", status), ("pos_profile", pos_profile), ("channel", channel), ("sales_partner", sales_partner)):
+	for key, value in (("company", company), ("customer", customer), ("status", status), ("pos_profile", pos_profile), ("channel", channel)):
 		if value:
 			filters.append([key, "=", value])
 			applied[key] = value
+
+	if sales_person:
+		invoices_of_person = frappe.get_all(
+			"Sales Team",
+			filters={"sales_person": sales_person, "parenttype": "Sales Invoice"},
+			pluck="parent",
+		)
+		filters.append(["name", "in", invoices_of_person or [""]])
+		applied["sales_person"] = sales_person
 
 	# Filter to only POS-created invoices
 	filters.append(["is_pos", "=", 1])
@@ -542,11 +569,14 @@ def list_sales_invoices(
 		data = frappe.get_list(
 			"Sales Invoice",
 			filters=filters or None,
-			fields=["name", "customer", "company", "pos_profile", "channel", "posting_date", "grand_total", "outstanding_amount", "status", "docstatus", "sales_partner", "total_commission", "commission_paid", "commission_journal_entry"],
+			fields=["name", "customer", "company", "pos_profile", "channel", "posting_date", "grand_total", "outstanding_amount", "status", "docstatus", "commission_paid", "commission_journal_entry"],
 			order_by=f"{order_by} {order}",
 			limit_start=(page - 1) * page_length,
 			limit_page_length=page_length,
 		)
+		commission = _get_commission_info([row.name for row in data])
+		for row in data:
+			row.update(commission[row.name])
 		return {"success": True, "count": len(data), "filters": applied, "data": data}
 	except Exception as e:
 		frappe.log_error(title="sales_invoice_pos.list_sales_invoices", message=str(e))
@@ -602,8 +632,8 @@ def cancel_sales_invoice(invoice: str, keep_commission_payment: int | str | None
 					),
 					"data": {
 						"commission_journal_entry": commission_je,
-						"sales_partner": doc.sales_partner,
-						"total_commission": doc.total_commission,
+						"sales_person": get_sales_person(doc),
+						"commission_amount": get_commission_amount(doc),
 					},
 				}
 			doc.flags.cancel_commission_je = cancel_je
@@ -801,6 +831,7 @@ def create_partial_sales_return(**kwargs):
 	return respond(201, _("Return Sales Invoice created successfully."), {
 		"return_invoice": return_doc.name,
 		"original_invoice": original_invoice,
-		"total_commission": return_doc.total_commission,
+		"sales_person": get_sales_person(return_doc),
+		"commission_amount": get_commission_amount(return_doc),
 		"commission_journal_entry": return_doc.get("commission_journal_entry"),
 	})

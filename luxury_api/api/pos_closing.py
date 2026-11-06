@@ -271,10 +271,10 @@ def _get_commission_paid_by_mode(pos_profile, start, end):
 	Counts every submitted commission JE of this profile's invoices in the period, including
 	cancelled invoices whose commission was kept, because that cash still left the drawer.
 	"""
-	si, query = paid_commission_query()
+	si, st, query = paid_commission_query()
 	timestamp = fn.Timestamp(si.posting_date, si.posting_time)
 	rows = (
-		query.select(si.commission_mode_of_payment, fn.Sum(si.total_commission).as_("amount"))
+		query.select(si.commission_mode_of_payment, fn.Sum(st.incentives).as_("amount"))
 		.where(si.pos_profile == pos_profile)
 		.where((timestamp >= start) & (timestamp <= end))
 		.groupby(si.commission_mode_of_payment)

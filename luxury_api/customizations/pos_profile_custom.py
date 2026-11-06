@@ -17,7 +17,7 @@ CUSTOM_FIELDS = {
             "options": "Account",
             "label": "Commission Expense Account",
             "insert_after": "branch",
-            "description": "Debited when Sales Partner commission is paid on the spot.",
+            "description": "Debited when Sales Person commission is paid on the spot.",
         },
         {
             "fieldname": "auto_cancel_commission_payment",
@@ -27,7 +27,7 @@ CUSTOM_FIELDS = {
             "label": "Auto Cancel Commission Payment",
             "insert_after": "commission_expense_account",
             "description": "Yes: cancelling an invoice also cancels its commission payment. "
-            "No: the POS must say whether the partner keeps the commission.",
+            "No: the POS must say whether the sales person keeps the commission.",
         },
         {
             "fieldname": "auto_recover_commission_on_return",
@@ -36,8 +36,8 @@ CUSTOM_FIELDS = {
             "default": "Yes",
             "label": "Auto Recover Commission on Return",
             "insert_after": "auto_cancel_commission_payment",
-            "description": "Yes: a return automatically records the partner giving back the returned share in cash. "
-            "No: the POS must say whether the partner gives it back.",
+            "description": "Yes: a return automatically records the sales person giving back the returned share in cash. "
+            "No: the POS must say whether the sales person gives it back.",
         },
     ],
     "Sales Invoice": [
@@ -45,7 +45,7 @@ CUSTOM_FIELDS = {
             "fieldname": "commission_paid",
             "fieldtype": "Check",
             "label": "Commission Paid",
-            "insert_after": "total_commission",
+            "insert_after": "sales_team",
             "read_only": 1,
             "no_copy": 1,
         },
@@ -77,7 +77,7 @@ def create_custom_fields():
         for field in fields:
             cf_name = f"{doctype}-{field['fieldname']}"
             if frappe.db.exists("Custom Field", cf_name):
-                frappe.db.set_value("Custom Field", cf_name, {"fieldtype": field["fieldtype"]})
+                frappe.db.set_value("Custom Field", cf_name, {"fieldtype": field["fieldtype"], "insert_after": field["insert_after"]})
             else:
                 create_custom_field(doctype, field)
             frappe.db.commit()

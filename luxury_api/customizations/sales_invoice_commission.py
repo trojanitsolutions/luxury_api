@@ -17,7 +17,7 @@ def auto_cancel_enabled(pos_profile):
 
 
 def auto_recover_enabled(pos_profile):
-	"""True if a return automatically recovers the partner's commission share (Select Yes/No, default Yes)."""
+	"""True if a return automatically recovers the sales person's commission share (Select Yes/No, default Yes)."""
 	if not pos_profile:
 		return True
 	return frappe.db.get_value("POS Profile", pos_profile, "auto_recover_commission_on_return") != "No"
@@ -31,12 +31,29 @@ def get_active_commission_je(invoice):
 	return None
 
 
+def get_commission_amount(doc):
+	"""Sales Person commission on the invoice: sum of Sales Team incentives (negative on a return)."""
+	return sum(flt(row.incentives) for row in doc.get("sales_team") or [])
+
+
+def get_sales_person(doc):
+	"""The invoice's sales person (the API sets a single Sales Team row)."""
+	team = doc.get("sales_team") or []
+	return team[0].sales_person if team else None
+
+
 def paid_commission_query():
-	"""Base query: invoices whose commission JE is submitted. Includes cancelled invoices whose JE was kept."""
+	"""Base query: invoices whose commission JE is submitted, joined to their Sales Team row.
+
+	Includes cancelled invoices whose JE was kept.
+	"""
 	si = frappe.qb.DocType("Sales Invoice")
+	st = frappe.qb.DocType("Sales Team")
 	je = frappe.qb.DocType("Journal Entry")
 	query = (
 		frappe.qb.from_(si)
+		.inner_join(st)
+		.on((st.parent == si.name) & (st.parenttype == "Sales Invoice"))
 		.inner_join(je)
 		.on(je.name == si.commission_journal_entry)
 		.where(je.docstatus == 1)
@@ -44,25 +61,27 @@ def paid_commission_query():
 		.where(si.is_pos == 1)
 		.where(si.is_created_using_pos == 1)
 	)
-	return si, query
+	return si, st, query
 
 
 def apply_fixed_commission(doc, method=None):
-	"""Sales Invoice validate hook. Runs after ERPNext's calculate_commission (rate × eligible amount).
+	"""Sales Invoice validate hook. Runs after ERPNext's calculate_contribution.
 
-	- Sale from the API (doc.flags.commission_amount): total_commission = that fixed amount.
-	- Return against an invoice with commission: total_commission = minus the same share of the
-	  original commission as the returned eligible value, capped so all returns never exceed it.
-	commission_rate is set to the matching % for information only.
+	- Sale from the API (doc.flags.commission_amount): the Sales Team row incentives = that fixed amount.
+	- Return against an invoice with commission: incentives = minus the same share of the original
+	  commission as the returned eligible value, capped so all returns never exceed it.
 	"""
+	team = doc.get("sales_team") or []
+	if not team:
+		return
 	fixed = doc.flags.get("commission_amount")
 	if fixed is not None:
-		_set_fixed_commission(doc, flt(fixed))
-	elif doc.is_return and doc.return_against and doc.sales_partner:
-		_set_return_commission_share(doc)
+		_set_fixed_commission(doc, team[0], flt(fixed))
+	elif doc.is_return and doc.return_against:
+		_set_return_commission_share(doc, team[0])
 
 
-def _set_fixed_commission(doc, amount):
+def _set_fixed_commission(doc, row, amount):
 	eligible = flt(doc.amount_eligible_for_commission)
 	if eligible <= 0:
 		frappe.throw(_("No item on this invoice is eligible for commission (Item 'Grant Commission' is off)."))
@@ -70,31 +89,37 @@ def _set_fixed_commission(doc, amount):
 		frappe.throw(
 			_("Commission amount {0} cannot be more than the commission-eligible amount {1}.").format(amount, eligible)
 		)
-	doc.total_commission = flt(amount, doc.precision("total_commission"))
-	doc.commission_rate = flt(amount / eligible * 100, doc.precision("commission_rate"))
+	row.incentives = flt(amount, doc.precision("incentives", row))
 
 
-def _set_return_commission_share(doc):
-	original = frappe.db.get_value(
-		"Sales Invoice", doc.return_against, ["total_commission", "amount_eligible_for_commission"], as_dict=True
+def _set_return_commission_share(doc, row):
+	original_eligible = flt(frappe.db.get_value("Sales Invoice", doc.return_against, "amount_eligible_for_commission"))
+	original_commission = sum(
+		flt(r.incentives)
+		for r in frappe.get_all(
+			"Sales Team",
+			filters={"parent": doc.return_against, "parenttype": "Sales Invoice"},
+			fields=["incentives"],
+		)
 	)
-	if not original or flt(original.total_commission) <= 0 or flt(original.amount_eligible_for_commission) <= 0:
+	if original_commission <= 0 or original_eligible <= 0:
 		return
 
-	share = flt(original.total_commission) * abs(flt(doc.amount_eligible_for_commission)) / flt(
-		original.amount_eligible_for_commission
-	)
+	share = original_commission * abs(flt(doc.amount_eligible_for_commission)) / original_eligible
 	si = frappe.qb.DocType("Sales Invoice")
+	st = frappe.qb.DocType("Sales Team")
 	result = (
 		frappe.qb.from_(si)
-		.select(Sum(si.total_commission))
+		.inner_join(st)
+		.on((st.parent == si.name) & (st.parenttype == "Sales Invoice"))
+		.select(Sum(st.incentives))
 		.where(si.return_against == doc.return_against)
 		.where(si.docstatus == 1)
 		.where(si.name != (doc.name or ""))
 	).run()
 	already_returned = -flt(result[0][0] if result else 0)
-	share = min(share, flt(original.total_commission) - already_returned)
-	doc.total_commission = -flt(max(share, 0), doc.precision("total_commission"))
+	share = min(share, original_commission - already_returned)
+	row.incentives = -flt(max(share, 0), doc.precision("incentives", row))
 
 
 def cancel_commission_journal_entry(doc, method=None):
@@ -113,7 +138,7 @@ def cancel_commission_journal_entry(doc, method=None):
 
 	if not decision:
 		frappe.msgprint(
-			_("Commission payment {0} was kept. Cancel it manually if the partner returned the money.").format(
+			_("Commission payment {0} was kept. Cancel it manually if the sales person returned the money.").format(
 				je_name
 			),
 			alert=True,
