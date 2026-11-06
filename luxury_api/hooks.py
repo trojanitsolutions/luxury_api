@@ -155,6 +155,13 @@ extend_doctype_class = {
 # 	}
 # }
 
+doc_events = {
+	"Sales Invoice": {
+		"validate": "luxury_api.customizations.sales_invoice_commission.apply_fixed_commission",
+		"on_cancel": "luxury_api.customizations.sales_invoice_commission.cancel_commission_journal_entry",
+	}
+}
+
 # Scheduled Tasks
 # ---------------
 

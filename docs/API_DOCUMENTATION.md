@@ -32,8 +32,12 @@ All endpoints are Frappe whitelisted methods, called as:
    - [create_pos_closing_entry](#create_pos_closing_entry)
 10. [Credit Sales](#credit-sales)
    - [Credit option on create_sales_invoice](#credit-option-on-create_sales_invoice)
-11. [Error Reference](#error-reference)
-12. [API Summary Table](#api-summary-table)
+11. [Sales Partner Commission](#sales-partner-commission)
+   - [Commission option on create_sales_invoice](#commission-option-on-create_sales_invoice)
+   - [list_sales_partners](#list_sales_partners)
+   - [get_commission_summary](#get_commission_summary)
+12. [Error Reference](#error-reference)
+13. [API Summary Table](#api-summary-table)
 
 ---
 
@@ -65,6 +69,9 @@ Creates a POS Closing Entry from an open POS Opening Entry, defaulting each paym
 
 ### Credit Sales (`api/sales_invoice_pos.py`)
 Credit (unpaid or partly paid) sales through `create_sales_invoice` for channels that allow credit.
+
+### Sales Partner Commission (`api/sales_invoice_pos.py`, `api/sales_partner.py`)
+Records a Sales Partner and commission rate on POS invoices, lists Sales Partners, and returns net commission per partner.
 
 ---
 
@@ -1593,6 +1600,220 @@ The response `data` is the full Sales Invoice; read `paid_amount` and `outstandi
 
 ---
 
+## Sales Partner Commission
+
+Full POS integration guide: [`COMMISSION_API.md`](COMMISSION_API.md).
+
+Commission is always a **fixed amount** sent by the POS. It is stored in the standard ERPNext Sales Invoice fields `sales_partner`, `amount_eligible_for_commission`, `total_commission` and `commission_rate`.
+
+On save:
+- `amount_eligible_for_commission` = sum of `base_net_amount` of items whose Item has **Grant Commission** checked (ERPNext).
+- `total_commission` = the `commission_amount` sent by the POS (set by a `validate` hook in this app, after ERPNext's own calculation).
+- `commission_rate` = `total_commission` / `amount_eligible_for_commission` × 100. For information only.
+
+### Setup
+
+| Where | Setting | Value |
+|---|---|---|
+| Sales Partner | Create one record per partner | The commission rate on the master is not used. The POS always sends the amount. |
+| Item | Grant Commission (`grant_commission`) | Checked by default. Uncheck for items that earn no commission. |
+| POS Profile | Commission Expense Account (`commission_expense_account`) | Expense ledger debited when commission is paid on the spot. Must belong to the POS Profile company. |
+| POS Profile | Auto Cancel Commission Payment (`auto_cancel_commission_payment`) | `Yes` (default): cancelling an invoice also cancels its commission payment. `No`: the POS must say what to do (see cancel below). |
+| POS Profile | Auto Recover Commission on Return (`auto_recover_commission_on_return`) | `Yes` (default): a return records the partner giving back the returned share in cash. `No`: the POS must say what to do (see Returns below). |
+| POS Profile | Payment methods | Must include a Mode of Payment of type **Cash** with a default account for the company. Commission is always paid from the first Cash mode in the list. |
+
+Run `bench --site <site> migrate` once to create the custom fields on POS Profile and Sales Invoice.
+
+---
+
+### Commission option on create_sales_invoice
+
+#### Endpoint
+```
+POST {base_url}/api/method/luxury_api.api.sales_invoice_pos.create_sales_invoice
+```
+
+#### New Parameters
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `sales_partner` | string | No | Existing Sales Partner name. Leave out for no commission. |
+| `commission_amount` | number | Yes, if `sales_partner` is given | Fixed commission amount, in company currency. Must be more than 0 and not more than `amount_eligible_for_commission`. |
+| `commission_paid` | 0/1 | No | Default `1`: the commission is paid to the partner now and a Journal Entry is made. Send `0` to only record the commission. |
+
+To record no commission, leave out `sales_partner`.
+
+Validations:
+- `commission_amount` given without `sales_partner` → 417.
+- `sales_partner` does not exist → 404 (`DoesNotExistError`).
+- `commission_amount` missing, not a number or `<= 0` → 417.
+- Commission Expense Account or Cash mode setup missing on the POS Profile → 417.
+- No item eligible for commission (Grant Commission off on all items) → 400.
+- `commission_amount` more than `amount_eligible_for_commission` → 400.
+
+#### Sample cURL
+```bash
+curl --location '{base_url}/api/method/luxury_api.api.sales_invoice_pos.create_sales_invoice' \
+--header 'Authorization: token api_key:api_secret' \
+--header 'Content-Type: application/json' \
+--data '{
+    "customer": "CUST-0001",
+    "company": "Luxury Pvt Ltd",
+    "pos_profile": "Branch 1 POS",
+    "items": [{"item_code": "ITEM-001", "qty": 1}],
+    "payments": [{"mode_of_payment": "Cash", "amount": 10000}],
+    "sales_partner": "Agent A",
+    "commission_amount": 500
+}'
+```
+
+The response `data` is the full Sales Invoice. Read `sales_partner`, `amount_eligible_for_commission` and `total_commission` from it.
+
+#### Commission payment (Journal Entry)
+
+When `commission_paid = 1` and `total_commission > 0`, the API submits a Journal Entry in the same transaction as the invoice:
+
+| Account | Debit | Credit |
+|---|---|---|
+| POS Profile `commission_expense_account` | `total_commission` | |
+| Default account of the POS Profile's Cash mode | | `total_commission` |
+
+- Commission is always paid in cash. Voucher type is `Cash Entry`. The cash mode used is saved in `commission_mode_of_payment`.
+- Cost center is the POS Profile cost center. Accounting dimensions (for example `channel`) are copied from the invoice.
+- The invoice stores `commission_paid`, `commission_mode_of_payment` and `commission_journal_entry`.
+- If the JE fails, the invoice is not created either. Setup errors (no expense account, no Cash mode, Cash mode without account) are returned before anything is created.
+
+#### Cancel
+
+`cancel_sales_invoice` takes an optional `keep_commission_payment` (0/1).
+
+| POS Profile "Auto Cancel Commission Payment" | `keep_commission_payment` | Result |
+|---|---|---|
+| Yes | not sent | Invoice and commission JE are cancelled. |
+| Yes or No | `0` | Invoice and commission JE are cancelled (partner returned the money). |
+| Yes or No | `1` | Invoice is cancelled. The commission JE stays (partner keeps the money). |
+| No | not sent | **HTTP 409**, nothing is cancelled. Response has `"requires_commission_decision": true` and `data.commission_journal_entry`, `data.total_commission`. The POS asks the cashier and calls again with `0` or `1`. |
+
+The success response `data` has `commission_journal_entry` and `commission_payment_cancelled`.
+
+A cancel from Desk follows the POS Profile setting: `Yes` cancels the JE, `No` keeps it and shows a message. The JE cannot be cancelled alone while its invoice is submitted.
+
+#### POS closing
+
+`create_pos_closing_entry` lowers the expected amount of each mode of payment by the commission paid from it during the shift (submitted commission JEs of this POS Profile's invoices, including cancelled invoices whose commission was kept). The response has a new top-level `commission_paid` (total for the shift).
+
+#### Returns
+
+`create_sales_invoice_return` and `create_partial_sales_return` copy `sales_partner` to the return invoice. The return gets a negative `total_commission` = the same share of the original commission as the share of the eligible value returned (example: 4,000 of 10,000 returned, 500 commission → −200). All returns together can never exceed the original commission. Earned commission goes down by that amount.
+
+If commission was paid on the original invoice, both endpoints take an optional `recover_commission` (0/1):
+
+| POS Profile "Auto Recover Commission on Return" | `recover_commission` | Result |
+|---|---|---|
+| Yes | not sent | Return is created and a recovery Cash Entry is submitted. |
+| Yes or No | `1` | Return is created and a recovery Cash Entry is submitted (partner gives the share back). |
+| Yes or No | `0` | Return is created. No recovery (partner keeps the share). |
+| No | not sent | **HTTP 409**, nothing is created. Response has `"requires_commission_decision": true`. The POS asks the cashier and calls again with `0` or `1`. |
+
+Recovery Cash Entry (example: 10,000 sale, 500 commission paid; 4,000 returned → 200):
+
+| Account | Debit | Credit |
+|---|---|---|
+| Cash (same account as the original payment) | 200 | |
+| Commission Expense (same account as the original payment) | | 200 |
+
+- The JE is made in the same transaction as the return. If it fails, the return is not created either.
+- The return invoice stores `commission_journal_entry` and `commission_mode_of_payment`. `create_partial_sales_return` also returns `total_commission` and `commission_journal_entry`.
+- POS closing adds the recovered cash back to the expected amount of the shift in which the return is posted.
+- `get_commission_summary`: `commission_paid` goes down by the recovered amount.
+- Cancelling a return that has a recovery JE follows the "Auto Cancel Commission Payment" rules above.
+- No commission paid on the original (or `total_commission = 0`) → nothing changes; `recover_commission` is ignored.
+
+`list_sales_invoices` also accepts a `sales_partner` filter and returns `sales_partner`, `total_commission`, `commission_paid` and `commission_journal_entry` for each row.
+
+---
+
+### list_sales_partners
+
+#### Endpoint
+```
+GET {base_url}/api/method/luxury_api.api.sales_partner.list_sales_partners
+```
+
+Returns all Sales Partners the user can read. Use it to fill the partner list in the POS.
+
+#### Success Response
+```json
+{
+    "message": {
+        "success": true,
+        "count": 1,
+        "data": [
+            {"name": "Agent A", "partner_name": "Agent A", "partner_type": "Agent", "territory": "All Territories"}
+        ]
+    }
+}
+```
+
+---
+
+### get_commission_summary
+
+#### Endpoint
+```
+GET {base_url}/api/method/luxury_api.api.sales_partner.get_commission_summary
+```
+
+Net commission per Sales Partner from submitted POS Sales Invoices (`is_pos = 1`, `is_created_using_pos = 1`). Return invoices are included, so totals are net of returns.
+
+#### Query Parameters
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `from_date` | string (YYYY-MM-DD) | No | Posting date from |
+| `to_date` | string (YYYY-MM-DD) | No | Posting date to |
+| `company` | string | No | Company |
+| `sales_partner` | string | No | One Sales Partner |
+| `pos_profile` | string | No | One POS Profile |
+| `channel` | string | No | Channel |
+| `branch` | string | No | Branch. Matches the POS Profiles with this `branch`. 404 if none. |
+
+#### Sample cURL
+```bash
+curl --location '{base_url}/api/method/luxury_api.api.sales_partner.get_commission_summary?from_date=2026-11-01&to_date=2026-11-30&branch=Branch%201' \
+--header 'Authorization: token api_key:api_secret'
+```
+
+#### Success Response
+```json
+{
+    "message": {
+        "success": true,
+        "filters": {"from_date": "2026-11-01", "to_date": "2026-11-30", "branch": "Branch 1"},
+        "data": [
+            {"sales_partner": "Agent A", "invoice_count": 3, "net_total": 25000.0, "amount_eligible_for_commission": 25000.0, "total_commission": 1250.0, "commission_paid": 1250.0}
+        ],
+        "totals": {"invoice_count": 3, "net_total": 25000.0, "amount_eligible_for_commission": 25000.0, "total_commission": 1250.0, "commission_paid": 1250.0}
+    }
+}
+```
+
+`invoice_count` includes return invoices.
+
+- `total_commission`: commission earned, net of returns (submitted invoices only).
+- `commission_paid`: net cash paid to the partner (payouts minus recoveries, submitted JEs only), including cancelled invoices whose commission was kept. It is higher than `total_commission` only when a return or cancel let the partner keep the share.
+
+#### Error Responses
+
+| Scenario | HTTP Status |
+|---|---|
+| Invalid date format | 400 |
+| No POS Profile for the branch | 404 |
+| No read permission on Sales Invoice | 403 |
+| Unexpected error (logged to Error Log) | 500 |
+
+---
+
 ## Error Reference
 
 | Scenario | HTTP Status | Response Shape |
@@ -1633,3 +1854,5 @@ Frappe's default exception payload shape (for uncaught `frappe.throw`/core excep
 | `get_pos_profile` | GET | `luxury_api.api.pos.get_pos_profile` | Session | No |
 | `create_pos_opening_entry` | POST | `luxury_api.api.pos_opening.create_pos_opening_entry` | Session | Creates & submits `POS Opening Entry` |
 | `create_pos_closing_entry` | POST | `luxury_api.api.pos_closing.create_pos_closing_entry` | Session | Creates draft `POS Closing Entry` |
+| `list_sales_partners` | GET | `luxury_api.api.sales_partner.list_sales_partners` | Session | No |
+| `get_commission_summary` | GET | `luxury_api.api.sales_partner.get_commission_summary` | Session | No |

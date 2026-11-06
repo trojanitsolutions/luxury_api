@@ -10,6 +10,8 @@ from frappe.query_builder import DocType
 from frappe.query_builder import functions as fn
 from frappe.query_builder.custom import ConstantColumn
 
+from luxury_api.customizations.sales_invoice_commission import paid_commission_query
+
 
 @frappe.whitelist(allow_guest=False, methods=["GET"])
 def get_pos_closing_entries(
@@ -177,6 +179,7 @@ def create_pos_closing_entry(
 	return {
 		"success": True,
 		"message": "POS Closing Entry created successfully.",
+		"commission_paid": flt(closing_entry.flags.commission_paid),
 		"pos_closing_entry": closing_entry.as_dict(),
 	}
 
@@ -262,6 +265,36 @@ def _build_invoice_query(invoice_doctype, pos_profile, start, end):
 	return query
 
 
+def _get_commission_paid_by_mode(pos_profile, start, end):
+	"""Commission paid on the spot during the shift, per mode of payment.
+
+	Counts every submitted commission JE of this profile's invoices in the period, including
+	cancelled invoices whose commission was kept, because that cash still left the drawer.
+	"""
+	si, query = paid_commission_query()
+	timestamp = fn.Timestamp(si.posting_date, si.posting_time)
+	rows = (
+		query.select(si.commission_mode_of_payment, fn.Sum(si.total_commission).as_("amount"))
+		.where(si.pos_profile == pos_profile)
+		.where((timestamp >= start) & (timestamp <= end))
+		.groupby(si.commission_mode_of_payment)
+		.run(as_dict=True)
+	)
+	return {r.commission_mode_of_payment: flt(r.amount) for r in rows if r.commission_mode_of_payment}
+
+
+def _deduct_commission_paid(payments, commission_by_mode):
+	"""Lower each mode's expected amount by the commission paid from it."""
+	rows = {p.mode_of_payment: p for p in payments}
+	for mode, amount in commission_by_mode.items():
+		if mode in rows:
+			rows[mode].expected_amount = flt(rows[mode].expected_amount) - amount
+		else:
+			payments.append(
+				frappe._dict({"mode_of_payment": mode, "opening_amount": 0, "expected_amount": -amount})
+			)
+
+
 def _get_invoices_multi_user(start, end, pos_profile):
 	"""Fetch invoices without owner filter, supporting multi-cashier POS sessions."""
 	sales_inv_query = _build_invoice_query("Sales Invoice", pos_profile, start, end)
@@ -306,6 +339,12 @@ def _make_closing_entry_from_opening_multi_user(opening_entry):
 		)
 		for p in data.get("payments")
 	]
+
+	commission_by_mode = _get_commission_paid_by_mode(
+		closing_entry.pos_profile, closing_entry.period_start_date, closing_entry.period_end_date
+	)
+	_deduct_commission_paid(payments, commission_by_mode)
+	closing_entry.flags.commission_paid = sum(commission_by_mode.values())
 
 	for d in data.get("invoices"):
 		invoice = "pos_invoice" if d.doctype == "POS Invoice" else "sales_invoice"

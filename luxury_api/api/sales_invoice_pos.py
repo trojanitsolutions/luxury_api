@@ -4,8 +4,14 @@ from datetime import datetime
 from frappe import _
 from frappe.utils import flt, cint
 
-FIELDS = ("customer", "company", "pos_profile", "items", "payments", "warehouse", "posting_date", "remarks", "update_stock", "discount_type", "discount_percentage", "discount_amount", "channel")
-RETURN_FIELDS = ("original_invoice", "posting_date", "posting_time", "remarks", "update_stock", "set_posting_time", "items")
+from luxury_api.customizations.sales_invoice_commission import (
+	auto_cancel_enabled,
+	auto_recover_enabled,
+	get_active_commission_je,
+)
+
+FIELDS = ("customer", "company", "pos_profile", "items", "payments", "warehouse", "posting_date", "remarks", "update_stock", "discount_type", "discount_percentage", "discount_amount", "channel", "sales_partner", "commission_amount", "commission_paid")
+RETURN_FIELDS = ("original_invoice", "posting_date", "posting_time", "remarks", "update_stock", "set_posting_time", "items", "recover_commission")
 
 
 def _get_original_items_map(original_invoice):
@@ -138,6 +144,185 @@ def _get_invoice_discount_fields(data):
 	return discount_fields
 
 
+def _resolve_commission(data):
+	"""Resolve the Sales Partner commission. Commission is always a fixed amount sent by the POS.
+
+	Returns (fields, amount). fields is {} when there is no partner. The amount is applied on the
+	invoice by the apply_fixed_commission validate hook, after ERPNext's own rate calculation.
+	"""
+	sales_partner = (data.get("sales_partner") or "").strip()
+	amount = data.get("commission_amount")
+	has_amount = amount not in (None, "")
+
+	if not sales_partner:
+		if has_amount:
+			frappe.throw(_("sales_partner is required when commission_amount is given."))
+		return {}, None
+
+	if not frappe.db.exists("Sales Partner", sales_partner):
+		frappe.throw(_("Sales Partner '{0}' does not exist.").format(sales_partner), frappe.DoesNotExistError)
+
+	if not has_amount:
+		frappe.throw(_("commission_amount is required when sales_partner is given."))
+	try:
+		amount = float(amount)
+	except (TypeError, ValueError):
+		frappe.throw(_("commission_amount must be a valid number."))
+	if amount <= 0:
+		frappe.throw(_("commission_amount must be greater than 0."))
+
+	return {"sales_partner": sales_partner}, amount
+
+
+def _get_cash_mode_of_payment(pos_profile):
+	"""Commission is always paid in cash: first POS Profile payment method whose type is Cash."""
+	modes = frappe.get_all(
+		"POS Payment Method",
+		filters={"parent": pos_profile, "parenttype": "POS Profile"},
+		pluck="mode_of_payment",
+		order_by="idx asc",
+	)
+	cash_modes = set(
+		frappe.get_all("Mode of Payment", filters={"name": ["in", modes or [""]], "type": "Cash"}, pluck="name")
+	)
+	mode = next((m for m in modes if m in cash_modes), None)
+	if not mode:
+		frappe.throw(_("POS Profile '{0}' has no Cash mode of payment to pay commission.").format(pos_profile))
+	return mode
+
+
+def _resolve_commission_payment(data, company, pos_profile):
+	"""Resolve the on-the-spot commission payment. commission_paid defaults to 1.
+
+	Validates accounts before the invoice is created, so a bad setup never leaves a half-done sale.
+	Returns {"commission_paid": 0} when not paid now.
+	"""
+	paid = data.get("commission_paid")
+	if not cint(1 if paid in (None, "") else paid):
+		return {"commission_paid": 0}
+
+	mode = _get_cash_mode_of_payment(pos_profile)
+
+	expense_account, cost_center = frappe.db.get_value(
+		"POS Profile", pos_profile, ["commission_expense_account", "cost_center"]
+	) or (None, None)
+	if not expense_account:
+		frappe.throw(_("Set 'Commission Expense Account' on POS Profile '{0}'.").format(pos_profile))
+	account = frappe.db.get_value("Account", expense_account, ["company", "is_group", "disabled"], as_dict=True)
+	if not account or account.company != company or account.is_group or account.disabled:
+		frappe.throw(
+			_("Commission Expense Account '{0}' must be an enabled ledger account of company '{1}'.").format(
+				expense_account, company
+			)
+		)
+
+	from erpnext.accounts.doctype.sales_invoice.sales_invoice import get_bank_cash_account
+
+	return {
+		"commission_paid": 1,
+		"commission_mode_of_payment": mode,
+		"expense_account": expense_account,
+		"paid_from_account": get_bank_cash_account(mode, company)["account"],
+		"cost_center": cost_center or frappe.get_cached_value("Company", company, "cost_center"),
+	}
+
+
+def _make_commission_journal_entry(invoice, payment):
+	"""Submit a Cash Entry linked to the invoice.
+
+	Sale:   Dr Commission Expense / Cr Cash  (commission paid to the partner)
+	Return: Dr Cash / Cr Commission Expense  (partner gives back the returned share)
+	The amount is abs(total_commission), which is negative on a return.
+	"""
+	from erpnext.accounts.doctype.accounting_dimension.accounting_dimension import get_accounting_dimensions
+
+	amount = abs(flt(invoice.total_commission))
+	cost_center = payment["cost_center"] or invoice.cost_center
+	dimensions = {d: invoice.get(d) for d in get_accounting_dimensions() if invoice.get(d)}
+	debit_account, credit_account = payment["expense_account"], payment["paid_from_account"]
+	remark = _("Commission paid to Sales Partner {0} against {1}")
+	if invoice.is_return:
+		debit_account, credit_account = credit_account, debit_account
+		remark = _("Commission recovered from Sales Partner {0} for return {1}")
+
+	je = frappe.get_doc({
+		"doctype": "Journal Entry",
+		"voucher_type": "Cash Entry",
+		"company": invoice.company,
+		"posting_date": invoice.posting_date,
+		"user_remark": remark.format(invoice.sales_partner, invoice.name),
+		"accounts": [
+			{"account": debit_account, "debit_in_account_currency": amount, "cost_center": cost_center, **dimensions},
+			{"account": credit_account, "credit_in_account_currency": amount, "cost_center": cost_center, **dimensions},
+		],
+	})
+	je.flags.ignore_permissions = True
+	je.insert()
+	je.submit()
+	invoice.db_set("commission_journal_entry", je.name)
+	return je.name
+
+
+def _get_original_commission_payment(original_je):
+	"""Accounts of the original commission JE, so the recovery reverses exactly the same accounts."""
+	rows = frappe.get_all(
+		"Journal Entry Account",
+		filters={"parent": original_je},
+		fields=["account", "cost_center", "debit_in_account_currency"],
+		order_by="idx asc",
+	)
+	expense = next(r for r in rows if flt(r.debit_in_account_currency) > 0)
+	cash = next(r for r in rows if flt(r.debit_in_account_currency) <= 0)
+	return {"expense_account": expense.account, "paid_from_account": cash.account, "cost_center": expense.cost_center}
+
+
+def _commission_recovery_check(original_invoice, recover_commission):
+	"""Decide whether a return recovers the partner's commission share.
+
+	Returns (original_je, recover, ask_response). original_je is None when no commission was paid.
+	ask_response is a 409 payload when the POS must ask the cashier (POS Profile set to "No"
+	and no recover_commission sent). An explicit recover_commission always wins.
+	"""
+	original = frappe.db.get_value(
+		"Sales Invoice",
+		original_invoice,
+		["commission_journal_entry", "pos_profile", "sales_partner", "total_commission"],
+		as_dict=True,
+	)
+	original_je = get_active_commission_je(original)
+	if not original_je:
+		return None, False, None
+	if recover_commission not in (None, ""):
+		return original_je, bool(cint(recover_commission)), None
+	if auto_recover_enabled(original.pos_profile):
+		return original_je, True, None
+
+	frappe.local.response.http_status_code = 409
+	return original_je, False, {
+		"success": False,
+		"requires_commission_decision": True,
+		"message": _(
+			"Commission was paid for this invoice. Send recover_commission = 1 if the partner gives back "
+			"the returned share, or 0 if the partner keeps it."
+		),
+		"data": {
+			"commission_journal_entry": original_je,
+			"sales_partner": original.sales_partner,
+			"total_commission": original.total_commission,
+		},
+	}
+
+
+def _recover_commission(return_doc, original_je):
+	"""Submit the recovery Cash Entry for a return and record the cash mode on the return invoice."""
+	if flt(return_doc.total_commission) >= 0:
+		return
+	payment = _get_original_commission_payment(original_je)
+	original_mode = frappe.db.get_value("Sales Invoice", return_doc.return_against, "commission_mode_of_payment")
+	return_doc.db_set("commission_mode_of_payment", original_mode)
+	_make_commission_journal_entry(return_doc, payment)
+
+
 def _prorate_payments(payments, ratio, precision):
 	if not payments:
 		return payments
@@ -196,6 +381,11 @@ def create_sales_invoice(**kwargs):
 
 	item_discounts = [_resolve_discount(item, _("Item {0}").format(idx)) for idx, item in enumerate(data["items"], 1)]
 	invoice_discount = _get_invoice_discount_fields(data)
+	commission, commission_amount = _resolve_commission(data)
+	payment = _resolve_commission_payment(data, company, pos_profile) if commission else {}
+	if commission:
+		commission["commission_paid"] = payment["commission_paid"]
+		commission["commission_mode_of_payment"] = payment.get("commission_mode_of_payment")
 
 	try:
 		doc = frappe.get_doc({
@@ -214,7 +404,10 @@ def create_sales_invoice(**kwargs):
 				for idx, i in enumerate(data["items"])
 			],
 			**invoice_discount,
+			**commission,
 		})
+		if commission:
+			doc.flags.commission_amount = commission_amount
 		doc.set_missing_values()
 
 		# Properly add payment rows (using append for correct child table registration)
@@ -246,6 +439,10 @@ def create_sales_invoice(**kwargs):
 		doc.set_account_for_mode_of_payment()
 		doc.insert()
 		doc.submit()
+
+		# Same transaction: if the JE fails, the invoice is rolled back too
+		if payment.get("commission_paid"):
+			_make_commission_journal_entry(doc, payment)
 	except frappe.ValidationError as e:
 		frappe.db.rollback()
 		frappe.local.response.http_status_code = 400
@@ -298,6 +495,7 @@ def list_sales_invoices(
 	status: str | None = None,
 	pos_profile: str | None = None,
 	channel: str | None = None,
+	sales_partner: str | None = None,
 	page: int | str = 1,
 	page_length: int | str = 20,
 	order_by: str = "posting_date",
@@ -318,7 +516,7 @@ def list_sales_invoices(
 			filters.append(["posting_date", op, value])
 			applied[key] = value
 
-	for key, value in (("company", company), ("customer", customer), ("status", status), ("pos_profile", pos_profile), ("channel", channel)):
+	for key, value in (("company", company), ("customer", customer), ("status", status), ("pos_profile", pos_profile), ("channel", channel), ("sales_partner", sales_partner)):
 		if value:
 			filters.append([key, "=", value])
 			applied[key] = value
@@ -344,7 +542,7 @@ def list_sales_invoices(
 		data = frappe.get_list(
 			"Sales Invoice",
 			filters=filters or None,
-			fields=["name", "customer", "company", "pos_profile", "channel", "posting_date", "grand_total", "outstanding_amount", "status", "docstatus"],
+			fields=["name", "customer", "company", "pos_profile", "channel", "posting_date", "grand_total", "outstanding_amount", "status", "docstatus", "sales_partner", "total_commission", "commission_paid", "commission_journal_entry"],
 			order_by=f"{order_by} {order}",
 			limit_start=(page - 1) * page_length,
 			limit_page_length=page_length,
@@ -355,8 +553,21 @@ def list_sales_invoices(
 		return respond(500, str(e))
 
 
+def _commission_cancel_decision(doc, keep_commission_payment):
+	"""Decide whether to cancel the commission JE together with the invoice.
+
+	Returns True/False, or None when the POS must ask the cashier (POS Profile set to "No"
+	and no keep_commission_payment sent). An explicit keep_commission_payment always wins.
+	"""
+	if keep_commission_payment not in (None, ""):
+		return not cint(keep_commission_payment)
+	if auto_cancel_enabled(doc.pos_profile):
+		return True
+	return None
+
+
 @frappe.whitelist(methods=["POST"])
-def cancel_sales_invoice(invoice: str):
+def cancel_sales_invoice(invoice: str, keep_commission_payment: int | str | None = None):
 	invoice = (invoice or "").strip()
 
 	if not invoice:
@@ -377,11 +588,33 @@ def cancel_sales_invoice(invoice: str):
 				"message": _("Sales Invoice can only be cancelled if it is submitted."),
 			}
 
+		commission_je = get_active_commission_je(doc)
+		if commission_je:
+			cancel_je = _commission_cancel_decision(doc, keep_commission_payment)
+			if cancel_je is None:
+				frappe.local.response.http_status_code = 409
+				return {
+					"success": False,
+					"requires_commission_decision": True,
+					"message": _(
+						"This invoice has a commission cash entry. Send keep_commission_payment = 1 to keep "
+						"it, or 0 to cancel it together with the invoice."
+					),
+					"data": {
+						"commission_journal_entry": commission_je,
+						"sales_partner": doc.sales_partner,
+						"total_commission": doc.total_commission,
+					},
+				}
+			doc.flags.cancel_commission_je = cancel_je
+
 		doc.cancel()
 	except frappe.ValidationError as e:
+		frappe.db.rollback()
 		frappe.local.response.http_status_code = 400
 		return {"success": False, "message": str(e)}
 	except Exception as e:
+		frappe.db.rollback()
 		frappe.log_error(title="luxury_api.sales_invoice_pos.cancel_sales_invoice")
 		frappe.local.response.http_status_code = 500
 		return {"success": False, "message": str(e)}
@@ -390,12 +623,18 @@ def cancel_sales_invoice(invoice: str):
 	return {
 		"success": True,
 		"message": "Sales Invoice cancelled successfully.",
-		"data": {"name": doc.name, "status": doc.status},
+		"data": {
+			"name": doc.name,
+			"status": doc.status,
+			"commission_journal_entry": doc.get("commission_journal_entry"),
+			"commission_payment_cancelled": bool(doc.get("commission_journal_entry"))
+			and frappe.db.get_value("Journal Entry", doc.commission_journal_entry, "docstatus") == 2,
+		},
 	}
 
 
 @frappe.whitelist(methods=["POST"])
-def create_sales_invoice_return(invoice: str):
+def create_sales_invoice_return(invoice: str, recover_commission: int | str | None = None):
 	def respond(status, message, data=None):
 		frappe.local.response.http_status_code = status
 		return {"success": status < 400, "message": message, **({"data": data} if data else {})}
@@ -409,12 +648,18 @@ def create_sales_invoice_return(invoice: str):
 	if frappe.db.get_value("Sales Invoice", invoice, "docstatus") != 1:
 		return respond(409, _("Can only create return for a submitted Sales Invoice."))
 
+	original_je, recover, ask = _commission_recovery_check(invoice, recover_commission)
+	if ask:
+		return ask
+
 	try:
 		from erpnext.accounts.doctype.sales_invoice.sales_invoice import make_sales_return
 
 		return_doc = make_sales_return(invoice)
 		return_doc.insert()
 		return_doc.submit()
+		if recover:
+			_recover_commission(return_doc, original_je)
 	except frappe.ValidationError as e:
 		frappe.db.rollback()
 		return respond(400, str(e))
@@ -446,6 +691,10 @@ def create_partial_sales_return(**kwargs):
 		return respond(409, _("Can only create return for a submitted Sales Invoice."))
 	if is_return:
 		return respond(400, _("Cannot create a return for an invoice that is already a return."))
+
+	original_je, recover, ask = _commission_recovery_check(original_invoice, data.get("recover_commission"))
+	if ask:
+		return ask
 
 	try:
 		_validate_rows(data.get("items"), "Items", "item_code", "qty")
@@ -538,6 +787,8 @@ def create_partial_sales_return(**kwargs):
 
 		return_doc.insert()
 		return_doc.submit()
+		if recover:
+			_recover_commission(return_doc, original_je)
 
 	except frappe.ValidationError as e:
 		frappe.db.rollback()
@@ -550,4 +801,6 @@ def create_partial_sales_return(**kwargs):
 	return respond(201, _("Return Sales Invoice created successfully."), {
 		"return_invoice": return_doc.name,
 		"original_invoice": original_invoice,
+		"total_commission": return_doc.total_commission,
+		"commission_journal_entry": return_doc.get("commission_journal_entry"),
 	})
