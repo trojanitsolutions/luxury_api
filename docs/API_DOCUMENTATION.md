@@ -36,8 +36,10 @@ All endpoints are Frappe whitelisted methods, called as:
    - [Commission option on create_sales_invoice](#commission-option-on-create_sales_invoice)
    - [list_sales_persons](#list_sales_persons)
    - [get_commission_summary](#get_commission_summary)
-12. [Error Reference](#error-reference)
-13. [API Summary Table](#api-summary-table)
+12. [Sales Invoice Search](#sales-invoice-search)
+   - [search_sales_invoices](#search_sales_invoices)
+13. [Error Reference](#error-reference)
+14. [API Summary Table](#api-summary-table)
 
 ---
 
@@ -72,6 +74,9 @@ Credit (unpaid or partly paid) sales through `create_sales_invoice` for channels
 
 ### Sales Person Commission (`api/sales_invoice_pos.py`, `api/sales_person.py`)
 Records a fixed Sales Person commission on POS invoices (Sales Team table), pays it in cash, lists Sales Persons, and returns net commission per sales person.
+
+### Sales Invoice Search (`api/sales_invoice_find.py`)
+Finds Sales Invoices that have a POS Profile, by customer name, item code, posting date, or a date range. Each row includes its items and sales person commission.
 
 ---
 
@@ -1814,6 +1819,91 @@ curl --location '{base_url}/api/method/luxury_api.api.sales_person.get_commissio
 
 ---
 
+## Sales Invoice Search
+
+### search_sales_invoices
+
+#### Purpose
+Find Sales Invoices by customer name, item code, posting date, or a date range. Only invoices with a POS Profile (`pos_profile` is set) are returned. Drafts, submitted, cancelled and return invoices are all included.
+
+#### Endpoint
+```
+GET {base_url}/api/method/luxury_api.api.sales_invoice_find.search_sales_invoices
+```
+
+#### Authentication
+Session or token. Guests are not allowed. Results are limited to the Sales Invoices the user can read.
+
+#### Query Parameters
+
+Give at least one of `customer_name`, `item_code`, `posting_date`, `from_date`, `to_date`. Filters are combined with AND.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `customer_name` | string | No | Partial, case-insensitive match on the customer name or the customer ID |
+| `item_code` | string | No | Exact item code. Returns invoices that have at least one row of this item. |
+| `posting_date` | string (YYYY-MM-DD) | No | Exact posting date |
+| `from_date` | string (YYYY-MM-DD) | No | Posting date from (inclusive) |
+| `to_date` | string (YYYY-MM-DD) | No | Posting date to (inclusive). Must not be before `from_date`. |
+| `page` | int | No | Page number. Default `1`. |
+| `page_length` | int | No | Rows per page. Default `20`. |
+| `order_by` | string | No | `posting_date` (default), `grand_total`, `customer`, `status`, `modified` |
+| `order` | string | No | `desc` (default) or `asc` |
+
+#### Sample cURL
+```bash
+curl --location '{base_url}/api/method/luxury_api.api.sales_invoice_find.search_sales_invoices?customer_name=ali&item_code=ITEM-001&from_date=2026-11-01&to_date=2026-11-30' \
+--header 'Authorization: token api_key:api_secret'
+```
+
+#### Success Response
+```json
+{
+    "message": {
+        "success": true,
+        "count": 1,
+        "filters": {"from_date": "2026-11-01", "to_date": "2026-11-30", "customer_name": "ali", "item_code": "ITEM-001"},
+        "data": [
+            {
+                "name": "ACC-SINV-2026-00012",
+                "customer": "Ali Hassan",
+                "customer_name": "Ali Hassan",
+                "company": "Luxury Store",
+                "pos_profile": "Main POS",
+                "channel": "Retail",
+                "posting_date": "2026-11-05",
+                "grand_total": 1500.0,
+                "outstanding_amount": 0.0,
+                "status": "Paid",
+                "docstatus": 1,
+                "is_return": 0,
+                "sales_person": "Ahmed",
+                "commission_amount": 75.0,
+                "items": [
+                    {"item_code": "ITEM-001", "item_name": "Leather Bag", "qty": 1.0, "rate": 1500.0, "amount": 1500.0}
+                ]
+            }
+        ]
+    }
+}
+```
+
+`count` is the number of rows on this page. `items` lists all rows of the invoice, not only the matched item.
+
+#### Error Responses
+
+| Scenario | HTTP Status |
+|---|---|
+| No search parameter given | 400 |
+| Invalid date format | 400 |
+| `from_date` after `to_date` | 400 |
+| Invalid `order_by`, `order`, `page` or `page_length` | 400 |
+| Unexpected error (logged to Error Log) | 500 |
+
+Error body: `{"success": false, "message": "..."}`.
+
+---
+
 ## Error Reference
 
 | Scenario | HTTP Status | Response Shape |
@@ -1856,3 +1946,4 @@ Frappe's default exception payload shape (for uncaught `frappe.throw`/core excep
 | `create_pos_closing_entry` | POST | `luxury_api.api.pos_closing.create_pos_closing_entry` | Session | Creates draft `POS Closing Entry` |
 | `list_sales_persons` | GET | `luxury_api.api.sales_person.list_sales_persons` | Session | No |
 | `get_commission_summary` | GET | `luxury_api.api.sales_person.get_commission_summary` | Session | No |
+| `search_sales_invoices` | GET | `luxury_api.api.sales_invoice_find.search_sales_invoices` | Session | No |

@@ -44,7 +44,8 @@ Add these fields to the normal sale request:
 
 Result:
 - The invoice's Sales Team table has one row: `sales_person: Ahmed`, `incentives: 500`.
-- A Cash Entry is made: **Dr Commission Expense 500 / Cr Cash 500**. Its name is in `commission_journal_entry`.
+- On the invoice form, the **Commission** section shows `Commission Paid`, `Commission Mode of Payment` and `Commission Journal Entry`. The sales person and amount are in the **Sales Team** table.
+- A Cash Entry is made: **Dr Commission Expense 500 / Cr Cash 500**. Its name is in `commission_journal_entry`. The JE links back to the invoice in **Commission for Sales Invoice** (`commission_sales_invoice`), and the invoice's **Connections** shows the JE.
 
 ---
 

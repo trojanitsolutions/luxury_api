@@ -258,6 +258,7 @@ def _make_commission_journal_entry(invoice, payment):
 		"company": invoice.company,
 		"posting_date": invoice.posting_date,
 		"user_remark": remark.format(get_sales_person(invoice), invoice.name),
+		"commission_sales_invoice": invoice.name,
 		"accounts": [
 			{"account": debit_account, "debit_in_account_currency": amount, "cost_center": cost_center, **dimensions},
 			{"account": credit_account, "credit_in_account_currency": amount, "cost_center": cost_center, **dimensions},

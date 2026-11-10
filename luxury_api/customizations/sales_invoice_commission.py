@@ -72,13 +72,12 @@ def apply_fixed_commission(doc, method=None):
 	  commission as the returned eligible value, capped so all returns never exceed it.
 	"""
 	team = doc.get("sales_team") or []
-	if not team:
-		return
-	fixed = doc.flags.get("commission_amount")
-	if fixed is not None:
-		_set_fixed_commission(doc, team[0], flt(fixed))
-	elif doc.is_return and doc.return_against:
-		_set_return_commission_share(doc, team[0])
+	if team:
+		fixed = doc.flags.get("commission_amount")
+		if fixed is not None:
+			_set_fixed_commission(doc, team[0], flt(fixed))
+		elif doc.is_return and doc.return_against:
+			_set_return_commission_share(doc, team[0])
 
 
 def _set_fixed_commission(doc, row, amount):
@@ -137,6 +136,8 @@ def cancel_commission_journal_entry(doc, method=None):
 		decision = auto_cancel_enabled(doc.pos_profile)
 
 	if not decision:
+		# The kept JE links back to this invoice; allow the cancel anyway
+		doc.ignore_linked_doctypes = (*(doc.get("ignore_linked_doctypes") or ()), "Journal Entry")
 		frappe.msgprint(
 			_("Commission payment {0} was kept. Cancel it manually if the sales person returned the money.").format(
 				je_name
@@ -148,3 +149,9 @@ def cancel_commission_journal_entry(doc, method=None):
 	je = frappe.get_doc("Journal Entry", je_name)
 	je.flags.ignore_permissions = True
 	je.cancel()
+
+
+def get_dashboard_data(data):
+	"""Show the commission Journal Entry under the invoice's Connections."""
+	data.setdefault("internal_links", {})["Journal Entry"] = "commission_journal_entry"
+	return data

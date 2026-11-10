@@ -12,7 +12,7 @@ app_license = "mit"
 
 after_install = "luxury_api.customizations.pos_profile_custom.create_custom_fields"
 after_uninstall = "luxury_api.customizations.pos_profile_custom.delete_custom_fields"
-after_migrate = "luxury_api.customizations.pos_profile_custom.create_custom_fields"
+after_migrate = "luxury_api.customizations.pos_profile_custom.after_migrate"
 
 # Extend DocType Class
 extend_doctype_class = {
@@ -209,6 +209,9 @@ doc_events = {
 # override_doctype_dashboards = {
 # 	"Task": "luxury_api.task.get_dashboard_data"
 # }
+override_doctype_dashboards = {
+	"Sales Invoice": "luxury_api.customizations.sales_invoice_commission.get_dashboard_data"
+}
 
 # exempt linked doctypes from being automatically cancelled
 #
