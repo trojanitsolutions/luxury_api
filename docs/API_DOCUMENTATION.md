@@ -76,7 +76,7 @@ Credit (unpaid or partly paid) sales through `create_sales_invoice` for channels
 Records a fixed Sales Person commission on POS invoices (Sales Team table), pays it in cash, lists Sales Persons, and returns net commission per sales person.
 
 ### Sales Invoice Search (`api/sales_invoice_find.py`)
-Finds Sales Invoices that have a POS Profile, by customer name, item code, posting date, or a date range. Each row includes its items and sales person commission.
+Finds Sales Invoices that have a POS Profile, by customer ID, customer name, item code, posting date, or a date range. Each row includes its items and sales person commission.
 
 ---
 
@@ -1821,10 +1821,12 @@ curl --location '{base_url}/api/method/luxury_api.api.sales_person.get_commissio
 
 ## Sales Invoice Search
 
+Full guide: [`INVOICE_SEARCH_API.md`](INVOICE_SEARCH_API.md).
+
 ### search_sales_invoices
 
 #### Purpose
-Find Sales Invoices by customer name, item code, posting date, or a date range. Only invoices with a POS Profile (`pos_profile` is set) are returned. Drafts, submitted, cancelled and return invoices are all included.
+Find Sales Invoices by customer ID, customer name, item code, posting date, or a date range. Only invoices with a POS Profile (`pos_profile` is set) are returned. Drafts, submitted, cancelled and return invoices are all included.
 
 #### Endpoint
 ```
@@ -1836,10 +1838,11 @@ Session or token. Guests are not allowed. Results are limited to the Sales Invoi
 
 #### Query Parameters
 
-Give at least one of `customer_name`, `item_code`, `posting_date`, `from_date`, `to_date`. Filters are combined with AND.
+Give at least one of `customer_id`, `customer_name`, `item_code`, `posting_date`, `from_date`, `to_date`. Filters are combined with AND.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `customer_id` | string | No | Exact customer ID, for example `CUST-0001` |
 | `customer_name` | string | No | Partial, case-insensitive match on the customer name or the customer ID |
 | `item_code` | string | No | Exact item code. Returns invoices that have at least one row of this item. |
 | `posting_date` | string (YYYY-MM-DD) | No | Exact posting date |
@@ -1852,6 +1855,19 @@ Give at least one of `customer_name`, `item_code`, `posting_date`, `from_date`, 
 
 #### Sample cURL
 ```bash
+# By customer ID
+curl --location '{base_url}/api/method/luxury_api.api.sales_invoice_find.search_sales_invoices?customer_id=CUST-0001' \
+--header 'Authorization: token api_key:api_secret'
+
+# By customer name
+curl --location '{base_url}/api/method/luxury_api.api.sales_invoice_find.search_sales_invoices?customer_name=ali' \
+--header 'Authorization: token api_key:api_secret'
+
+# By item code
+curl --location '{base_url}/api/method/luxury_api.api.sales_invoice_find.search_sales_invoices?item_code=ITEM-001' \
+--header 'Authorization: token api_key:api_secret'
+
+# Customer name, item code and date range
 curl --location '{base_url}/api/method/luxury_api.api.sales_invoice_find.search_sales_invoices?customer_name=ali&item_code=ITEM-001&from_date=2026-11-01&to_date=2026-11-30' \
 --header 'Authorization: token api_key:api_secret'
 ```

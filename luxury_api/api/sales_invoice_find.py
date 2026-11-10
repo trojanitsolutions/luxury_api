@@ -23,6 +23,7 @@ ITEM_FIELDS = ["parent", "item_code", "item_name", "qty", "rate", "amount"]
 
 @frappe.whitelist(allow_guest=False, methods=["GET"])
 def search_sales_invoices(
+	customer_id: str | None = None,
 	customer_name: str | None = None,
 	item_code: str | None = None,
 	posting_date: str | None = None,
@@ -33,12 +34,14 @@ def search_sales_invoices(
 	order_by: str = "posting_date",
 	order: str = "desc",
 ):
+	customer_id = (customer_id or "").strip()
 	customer_name = (customer_name or "").strip()
 	item_code = (item_code or "").strip()
 
-	if not any((customer_name, item_code, posting_date, from_date, to_date)):
+	if not any((customer_id, customer_name, item_code, posting_date, from_date, to_date)):
 		return _respond(
-			400, "Provide at least one of customer_name, item_code, posting_date, from_date, to_date."
+			400,
+			"Provide at least one of customer_id, customer_name, item_code, posting_date, from_date, to_date.",
 		)
 
 	try:
@@ -49,6 +52,10 @@ def search_sales_invoices(
 
 	filters.append(["pos_profile", "is", "set"])
 	or_filters = None
+
+	if customer_id:
+		filters.append(["customer", "=", customer_id])
+		applied["customer_id"] = customer_id
 
 	if customer_name:
 		or_filters = _customer_or_filters(customer_name)
